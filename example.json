@@ -1,0 +1,11 @@
+{
+  "create_job_request": {
+    "title": "AI Agent 开发工程师",
+    "company": "某智能科技公司",
+    "source": "Boss 直聘",
+    "jd_text": "岗位职责：1. 基于 LangChain / LangGraph 构建智能 Agent 系统；2. 负责 Prompt 设计、工具调用、RAG 方案落地；3. 与业务团队合作，持续优化简历分析和岗位匹配效果。任职要求：1. 熟悉 Python、FastAPI、SQLAlchemy；2. 熟悉大模型应用开发，了解 DeepSeek 或同类模型；3. 有向量数据库、检索增强生成、工作流编排经验优先。"
+  },
+  "revise_resume_request": {
+    "resume_text": "3 年 Python 后端开发经验，熟悉 FastAPI、MySQL、Redis，参与过企业知识库和 NLP 项目开发。具备一定的大模型应用开发经验，了解 Prompt 设计与 API 接入。"
+  }
+}

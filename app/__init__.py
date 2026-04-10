@@ -1,0 +1,1 @@
+"""FindGoodJob application package."""
