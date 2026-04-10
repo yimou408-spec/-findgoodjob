@@ -1,0 +1,9 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# local runtime files
+*.db
+__pycache__/
+.pytest_cache/
