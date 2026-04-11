@@ -3,6 +3,8 @@ import type {
   AnalyzeJobResponse,
   JobCreateInput,
   JobResponse,
+  ResumeDocumentParseResponse,
+  JobUpdateInput,
   ResumeRevisionInput,
   ResumeRevisionResponse,
 } from "./types";
@@ -14,8 +16,20 @@ export function getJobs() {
 export function createJob(input: JobCreateInput) {
   return apiRequest<JobResponse>("/jobs", {
     method: "POST",
-    // 这里传原始对象即可，请求层会统一完成 JSON 序列化。
     body: input,
+  });
+}
+
+export function updateJob(jobId: number, input: JobUpdateInput) {
+  return apiRequest<JobResponse>(`/jobs/${jobId}`, {
+    method: "PUT",
+    body: input,
+  });
+}
+
+export function deleteJob(jobId: number) {
+  return apiRequest<null>(`/jobs/${jobId}`, {
+    method: "DELETE",
   });
 }
 
@@ -33,6 +47,16 @@ export function reviseResume(jobId: number, input: ResumeRevisionInput) {
   return apiRequest<ResumeRevisionResponse>(`/jobs/${jobId}/revise-resume`, {
     method: "POST",
     body: input,
+  });
+}
+
+export function parseResumeDocument(file: File) {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  return apiRequest<ResumeDocumentParseResponse>("/resume/parse-document", {
+    method: "POST",
+    body: formData,
   });
 }
 

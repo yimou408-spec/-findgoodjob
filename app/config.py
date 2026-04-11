@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     deepseek_api_key: str | None = None
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-chat"
+    deepseek_timeout_seconds: float = 90.0
     database_url: str = "sqlite:///./findgoodjob.db"
     app_env: str = "development"
     debug: bool | str = False

@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { analyzeJob, createJob, getHealth, getJob, getJobs, reviseResume } from "./api";
-import type { JobCreateInput, ResumeRevisionInput } from "./types";
+import { analyzeJob, createJob, deleteJob, getHealth, getJob, getJobs, parseResumeDocument, reviseResume, updateJob } from "./api";
+import type { JobCreateInput, JobUpdateInput, ResumeRevisionInput } from "./types";
 
 export function useHealth() {
   return useQuery({
@@ -11,7 +11,6 @@ export function useHealth() {
   });
 }
 
-// React Query 统一管理服务端状态，避免页面自己维护列表缓存和刷新时机。
 export function useJobs() {
   return useQuery({
     queryKey: ["jobs"],
@@ -38,6 +37,30 @@ export function useCreateJob() {
   });
 }
 
+export function useUpdateJob() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ jobId, input }: { jobId: number; input: JobUpdateInput }) => updateJob(jobId, input),
+    onSuccess: (job) => {
+      queryClient.invalidateQueries({ queryKey: ["jobs"] });
+      queryClient.invalidateQueries({ queryKey: ["job", job.id] });
+    },
+  });
+}
+
+export function useDeleteJob() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (jobId: number) => deleteJob(jobId),
+    onSuccess: (_, jobId) => {
+      queryClient.invalidateQueries({ queryKey: ["jobs"] });
+      queryClient.removeQueries({ queryKey: ["job", jobId] });
+    },
+  });
+}
+
 export function useAnalyzeJob() {
   const queryClient = useQueryClient();
 
@@ -54,5 +77,11 @@ export function useReviseResume() {
   return useMutation({
     mutationFn: ({ jobId, input }: { jobId: number; input: ResumeRevisionInput }) =>
       reviseResume(jobId, input),
+  });
+}
+
+export function useParseResumeDocument() {
+  return useMutation({
+    mutationFn: (file: File) => parseResumeDocument(file),
   });
 }

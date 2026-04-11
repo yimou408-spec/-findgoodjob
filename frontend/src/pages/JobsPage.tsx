@@ -3,11 +3,20 @@ import { useEffect, useMemo, useState } from "react";
 import { HealthBadge } from "../features/jobs/components/HealthBadge";
 import { JobAnalysisPanel } from "../features/jobs/components/JobAnalysisPanel";
 import { JobCreateModal } from "../features/jobs/components/JobCreateModal";
+import { JobDeleteDialog } from "../features/jobs/components/JobDeleteDialog";
 import { JobDetailPanel } from "../features/jobs/components/JobDetailPanel";
 import { JobListPanel } from "../features/jobs/components/JobListPanel";
 import { ResumeRevisionPanel } from "../features/jobs/components/ResumeRevisionPanel";
-import { useAnalyzeJob, useCreateJob, useJob, useJobs, useReviseResume } from "../features/jobs/hooks";
-import type { JobCreateInput } from "../features/jobs/types";
+import {
+  useAnalyzeJob,
+  useCreateJob,
+  useDeleteJob,
+  useJob,
+  useJobs,
+  useReviseResume,
+  useUpdateJob,
+} from "../features/jobs/hooks";
+import type { JobCreateInput, JobResponse, ResumeRevisionResponse } from "../features/jobs/types";
 import { ApiError } from "../shared/api/client";
 import { Button } from "../shared/ui/Button";
 import { EmptyState } from "../shared/ui/EmptyState";
@@ -38,19 +47,31 @@ function getErrorMessage(error: unknown) {
   return "发生未知错误，请稍后重试。";
 }
 
+function toJobForm(job: JobResponse): JobCreateInput {
+  return {
+    title: job.title,
+    company: job.company,
+    source: job.source ?? undefined,
+    jd_text: job.jd_text,
+  };
+}
+
 export function JobsPage() {
   const [selectedJobId, setSelectedJobId] = useState<number | null>(() => loadSelectedJobId());
   const [createModalOpen, setCreateModalOpen] = useState(false);
+  const [editingJob, setEditingJob] = useState<JobResponse | null>(null);
+  const [deletingJob, setDeletingJob] = useState<JobResponse | null>(null);
   const [feedback, setFeedback] = useState<{ type: "success" | "error"; message: string } | null>(null);
-  const [resumeResult, setResumeResult] = useState("");
+  const [resumeResult, setResumeResult] = useState<ResumeRevisionResponse | null>(null);
 
   const jobsQuery = useJobs();
   const createJobMutation = useCreateJob();
+  const updateJobMutation = useUpdateJob();
+  const deleteJobMutation = useDeleteJob();
   const analyzeJobMutation = useAnalyzeJob();
   const reviseResumeMutation = useReviseResume();
   const selectedJobQuery = useJob(selectedJobId);
 
-  // 页面容器统一编排“列表 -> 当前岗位 -> 分析/修订”的状态流，子组件只接收 props。
   useEffect(() => {
     const jobs = jobsQuery.data ?? [];
     if (jobs.length === 0) {
@@ -87,8 +108,44 @@ export function JobsPage() {
       const created = await createJobMutation.mutateAsync(input);
       setSelectedJobId(created.id);
       setCreateModalOpen(false);
-      setResumeResult("");
+      setResumeResult(null);
       setFeedback({ type: "success", message: `岗位《${created.title}》已创建，可继续分析和修订简历。` });
+    } catch (error) {
+      setFeedback({ type: "error", message: getErrorMessage(error) });
+    }
+  }
+
+  async function handleUpdateJob(input: JobCreateInput) {
+    if (!editingJob) {
+      return;
+    }
+
+    try {
+      const updated = await updateJobMutation.mutateAsync({ jobId: editingJob.id, input });
+      setEditingJob(null);
+      setSelectedJobId(updated.id);
+      setResumeResult(null);
+      setFeedback({ type: "success", message: `岗位《${updated.title}》已更新，列表与详情已同步刷新。` });
+    } catch (error) {
+      setFeedback({ type: "error", message: getErrorMessage(error) });
+    }
+  }
+
+  async function handleDeleteJob() {
+    if (!deletingJob) {
+      return;
+    }
+
+    const target = deletingJob;
+
+    try {
+      await deleteJobMutation.mutateAsync(target.id);
+      if (selectedJobId === target.id) {
+        setSelectedJobId(null);
+        setResumeResult(null);
+      }
+      setDeletingJob(null);
+      setFeedback({ type: "success", message: `岗位《${target.title}》已删除。` });
     } catch (error) {
       setFeedback({ type: "error", message: getErrorMessage(error) });
     }
@@ -117,8 +174,8 @@ export function JobsPage() {
         jobId: selectedJobId,
         input: { resume_text: resumeText },
       });
-      setResumeResult(response.revised_resume);
-      setFeedback({ type: "success", message: "简历修订已完成，可继续复制或调整原始内容后重新生成。" });
+      setResumeResult(response);
+      setFeedback({ type: "success", message: "简历修订已完成，右侧已同步展示匹配度评分与修订结果。" });
     } catch (error) {
       setFeedback({ type: "error", message: getErrorMessage(error) });
     }
@@ -150,10 +207,14 @@ export function JobsPage() {
         <JobListPanel
           jobs={jobs}
           selectedJobId={selectedJobId}
+          editingJobId={updateJobMutation.isPending ? editingJob?.id ?? null : null}
+          deletingJobId={deleteJobMutation.isPending ? deletingJob?.id ?? null : null}
           onSelect={(jobId) => {
             setSelectedJobId(jobId);
-            setResumeResult("");
+            setResumeResult(null);
           }}
+          onEdit={(job) => setEditingJob(job)}
+          onDelete={(job) => setDeletingJob(job)}
           actions={<Button onClick={() => setCreateModalOpen(true)}>新增岗位</Button>}
         />
 
@@ -190,6 +251,23 @@ export function JobsPage() {
         submitting={createJobMutation.isPending}
         onClose={() => setCreateModalOpen(false)}
         onSubmit={handleCreateJob}
+      />
+
+      <JobCreateModal
+        open={editingJob !== null}
+        mode="edit"
+        initialValues={editingJob ? toJobForm(editingJob) : undefined}
+        submitting={updateJobMutation.isPending}
+        onClose={() => setEditingJob(null)}
+        onSubmit={handleUpdateJob}
+      />
+
+      <JobDeleteDialog
+        open={deletingJob !== null}
+        job={deletingJob}
+        deleting={deleteJobMutation.isPending}
+        onClose={() => setDeletingJob(null)}
+        onConfirm={handleDeleteJob}
       />
     </div>
   );

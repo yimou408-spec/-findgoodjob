@@ -1,3 +1,5 @@
+import json
+
 import httpx
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_deepseek import ChatDeepSeek
@@ -15,9 +17,9 @@ def build_llm() -> ChatDeepSeek:
     if not llm_available():
         raise ModelInvocationError("未配置 DEEPSEEK_API_KEY，无法调用 DeepSeek 模型。")
 
-    # 显式忽略系统代理环境变量，避免被本机无效代理拦截到 127.0.0.1:9。
-    http_client = httpx.Client(trust_env=False, timeout=30.0)
-    http_async_client = httpx.AsyncClient(trust_env=False, timeout=30.0)
+    timeout = settings.deepseek_timeout_seconds
+    http_client = httpx.Client(trust_env=False, timeout=timeout)
+    http_async_client = httpx.AsyncClient(trust_env=False, timeout=timeout)
 
     return ChatDeepSeek(
         model=settings.deepseek_model,
@@ -30,6 +32,15 @@ def build_llm() -> ChatDeepSeek:
     )
 
 
+def _parse_json_content(content: str) -> dict:
+    text = content.strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError("model did not return a JSON object")
+    return json.loads(text[start : end + 1])
+
+
 class JobAnalysisAgent:
     def invoke(self, payload: dict) -> dict:
         jd_text = payload["input"]
@@ -37,30 +48,29 @@ class JobAnalysisAgent:
         focus = "、".join(detect_focus_areas(jd_text))
         summary = summarize_job(jd_text)
 
-        llm = build_llm().bind(max_tokens=700)
+        llm = build_llm().bind(max_tokens=900)
         prompt = ChatPromptTemplate.from_messages(
             [
                 (
                     "system",
                     (
-                        "你是一个求职助手，负责对岗位 JD 做结构化分析。"
-                        "请直接输出中文结果，不要寒暄，不要补充额外说明。"
-                        "按以下结构返回，并尽量简洁：\n"
-                        "1. 岗位核心职责\n"
-                        "2. 关键技能要求\n"
-                        "3. 加分项\n"
-                        "4. 候选人应重点强调的经历\n"
-                        "5. 简历优化建议"
+                        "你是岗位分析专家。"
+                        "请基于岗位 JD 输出严格合法的 JSON，不要输出 JSON 之外的任何说明。"
+                        "JSON 必须包含以下字段："
+                        "analysis_result（字符串）"
+                        "和 improvement_advice（字符串数组，至少 2 条）。"
+                        "岗位分析阶段不要对 JD 本身打匹配度分数，评分应留给后续简历修订阶段。"
                     ),
                 ),
                 (
                     "human",
                     (
                         "岗位 JD：\n{jd_text}\n\n"
-                        "工具结果：\n"
+                        "辅助信息：\n"
                         "关键词：{keywords}\n"
                         "岗位重点方向：{focus}\n"
-                        "岗位摘要：{summary}\n"
+                        "岗位摘要：{summary}\n\n"
+                        "请输出岗位分析摘要，以及给候选人的简历优化建议。"
                     ),
                 ),
             ]
@@ -75,9 +85,9 @@ class JobAnalysisAgent:
                     "summary": summary,
                 }
             )
+            return _parse_json_content(result.content)
         except Exception as exc:
             raise ModelInvocationError(f"DeepSeek 岗位分析调用失败: {exc}") from exc
-        return {"output": result.content}
 
 
 def build_job_analysis_agent() -> JobAnalysisAgent:

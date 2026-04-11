@@ -19,3 +19,13 @@ class DatabaseError(AppError):
 class ModelInvocationError(AppError):
     def __init__(self, message: str = "模型调用失败", error_code: str = "model_invocation_error"):
         super().__init__(message=message, status_code=502, error_code=error_code)
+
+
+class FileValidationError(AppError):
+    def __init__(self, message: str = "上传文件不合法", error_code: str = "file_validation_error", status_code: int = 400):
+        super().__init__(message=message, status_code=status_code, error_code=error_code)
+
+
+class FileProcessingError(AppError):
+    def __init__(self, message: str = "文件解析失败", error_code: str = "file_processing_error"):
+        super().__init__(message=message, status_code=422, error_code=error_code)

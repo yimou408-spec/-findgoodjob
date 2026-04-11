@@ -11,28 +11,33 @@ export class ApiError extends Error {
   }
 }
 
-// 所有请求统一从环境变量读取后端地址，便于本地开发和部署切换。
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 
 type RequestOptions = Omit<RequestInit, "body"> & {
   body?: unknown;
 };
 
+function isFormData(body: unknown): body is FormData {
+  return typeof FormData !== "undefined" && body instanceof FormData;
+}
+
 export async function apiRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const { body, headers, ...rest } = options;
+  const formDataBody = isFormData(body);
 
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...rest,
-    headers: {
-      "Content-Type": "application/json",
-      ...headers,
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
+    headers: formDataBody
+      ? headers
+      : {
+          "Content-Type": "application/json",
+          ...headers,
+        },
+    body: body === undefined ? undefined : formDataBody ? body : JSON.stringify(body),
   });
 
   const data = response.status === 204 ? null : await response.json().catch(() => null);
 
-  // 统一解析后端的 detail/error_code，避免每个页面单独处理错误结构。
   if (!response.ok) {
     throw new ApiError(
       data?.detail ?? "请求失败，请稍后重试",

@@ -145,6 +145,19 @@ textarea {
   border: 1px solid var(--line);
 }
 
+.btn-danger {
+  background: var(--danger);
+  color: #fff;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: #a93434;
+}
+
+.btn-danger-ghost {
+  color: var(--danger);
+}
+
 .status-pill {
   display: inline-flex;
   align-items: center;
@@ -211,6 +224,16 @@ textarea {
   line-height: 1.6;
 }
 
+.file-input-hidden {
+  display: none;
+}
+
+.upload-hint {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .job-list {
   display: grid;
   gap: 10px;
@@ -235,6 +258,19 @@ textarea {
 .job-list-item h3 {
   margin: 0 0 6px;
   font-size: 16px;
+}
+
+.job-list-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: start;
+}
+
+.job-list-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .job-list-meta {
@@ -266,6 +302,48 @@ textarea {
   padding: 14px;
   white-space: pre-wrap;
   line-height: 1.7;
+}
+
+.analysis-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.analysis-score-card {
+  border: 1px solid var(--line);
+  background: linear-gradient(135deg, rgba(25, 79, 109, 0.08), rgba(255, 253, 248, 0.95));
+  border-radius: 18px;
+  padding: 16px;
+  display: grid;
+  gap: 10px;
+}
+
+.analysis-score-value {
+  font-size: 42px;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+}
+
+.analysis-score-value span {
+  font-size: 16px;
+  color: var(--muted);
+  font-weight: 500;
+  margin-left: 6px;
+}
+
+.analysis-list {
+  margin: 8px 0 0;
+  padding-left: 20px;
+}
+
+.analysis-list li + li {
+  margin-top: 8px;
+}
+
+.analysis-note {
+  margin-top: 8px;
+  color: var(--muted);
 }
 
 .empty-state {
@@ -327,6 +405,10 @@ textarea {
   padding: 22px;
 }
 
+.modal-panel-compact {
+  width: min(520px, 100%);
+}
+
 .modal-header {
   display: flex;
   justify-content: space-between;
@@ -346,6 +428,11 @@ textarea {
   gap: 12px;
 }
 
+.modal-actions {
+  margin-top: 16px;
+  justify-content: flex-end;
+}
+
 @media (max-width: 1180px) {
   .workspace-grid {
     grid-template-columns: 1fr;
@@ -363,6 +450,10 @@ textarea {
 
   .split-fields {
     grid-template-columns: 1fr;
+  }
+
+  .job-list-header {
+    flex-direction: column;
   }
 
   .app-title {
