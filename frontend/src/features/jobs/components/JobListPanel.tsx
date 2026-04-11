@@ -45,7 +45,7 @@ export function JobListPanel({
               type="button"
             >
               <div className="job-list-header">
-                <div>
+                <div className="job-list-heading">
                   <h3>{job.title}</h3>
                   <div className="job-list-meta">{job.company}</div>
                 </div>
@@ -53,6 +53,7 @@ export function JobListPanel({
                   <Button
                     type="button"
                     variant="ghost"
+                    className="btn-chip"
                     disabled={editingJobId === job.id}
                     onClick={(event) => {
                       event.stopPropagation();
@@ -64,7 +65,7 @@ export function JobListPanel({
                   <Button
                     type="button"
                     variant="ghost"
-                    className="btn-danger-ghost"
+                    className="btn-chip btn-danger-ghost"
                     disabled={deletingJobId === job.id}
                     onClick={(event) => {
                       event.stopPropagation();

@@ -30,11 +30,6 @@ export function JobDetailPanel({ job, loading }: JobDetailPanelProps) {
           </div>
 
           <div className="detail-block">
-            <span className="detail-label">岗位来源</span>
-            <span>{job.source ?? "未填写"}</span>
-          </div>
-
-          <div className="detail-block">
             <span className="detail-label">岗位 JD</span>
             <div className="content-box">{job.jd_text}</div>
           </div>

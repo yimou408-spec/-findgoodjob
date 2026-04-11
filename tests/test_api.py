@@ -1,6 +1,6 @@
 from io import BytesIO
 
-from app.services import jd_service, resume_service
+from app.services import assistant_service, jd_service, resume_service
 from app.services.document_service import MAX_UPLOAD_SIZE_BYTES
 
 
@@ -8,7 +8,6 @@ def create_job_payload():
     return {
         "title": "AI Agent 开发工程师",
         "company": "测试公司",
-        "source": "Boss直聘",
         "jd_text": "岗位职责：基于 LangChain 构建 Agent 系统，负责工具调用和 RAG 方案落地，熟悉 Python、FastAPI、DeepSeek 等技术栈。",
     }
 
@@ -51,7 +50,6 @@ def test_update_job(client):
         json={
             "title": "高级 AI Agent 工程师",
             "company": "新测试公司",
-            "source": "LinkedIn",
             "jd_text": "负责智能体平台建设、RAG 工作流和 Prompt 工程落地，要求熟悉 Python、FastAPI、SQLAlchemy 与生产环境调优。",
         },
     )
@@ -154,6 +152,84 @@ def test_validation_error_for_short_resume(client):
     response = client.post(f"/jobs/{created['id']}/revise-resume", json={"resume_text": "太短了"})
     assert response.status_code == 422
     assert response.json()["error_code"] == "validation_error"
+
+
+def test_get_assistant_thread_initial_state(client, monkeypatch):
+    monkeypatch.setattr(assistant_service, "llm_available", lambda: False)
+    created = client.post("/jobs", json=create_job_payload()).json()
+
+    response = client.get(f"/jobs/{created['id']}/assistant/thread")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["job_id"] == created["id"]
+    assert data["messages"] == []
+    assert data["can_chat"] is False
+    assert "岗位 JD" in data["workspace_summary"]
+    assert data["latest_resume_revision"] is None
+
+
+def test_get_assistant_thread_includes_latest_resume_revision(client, monkeypatch):
+    monkeypatch.setattr(jd_service, "llm_available", lambda: False)
+    monkeypatch.setattr(resume_service, "llm_available", lambda: False)
+    monkeypatch.setattr(assistant_service, "llm_available", lambda: False)
+    created = client.post("/jobs", json=create_job_payload()).json()
+    client.post(f"/jobs/{created['id']}/analyze")
+    client.post(
+        f"/jobs/{created['id']}/revise-resume",
+        json={"resume_text": "3 年 Python 后端经验，熟悉 FastAPI、MySQL、Redis，也做过知识库和 RAG 项目。"},
+    )
+
+    response = client.get(f"/jobs/{created['id']}/assistant/thread")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["latest_resume_revision"] is not None
+    assert data["latest_resume_revision"]["revised_resume"]
+    assert "最近一次简历修订输出" in data["workspace_summary"]
+
+
+def test_assistant_chat_stream_persists_messages(client, monkeypatch):
+    async def fake_stream_chat_completion(_messages, max_tokens):
+        assert max_tokens == 1200
+        yield "第一段回复"
+        yield "，第二段回复"
+
+    monkeypatch.setattr(assistant_service, "llm_available", lambda: True)
+    monkeypatch.setattr(assistant_service, "stream_chat_completion", fake_stream_chat_completion)
+    monkeypatch.setattr(assistant_service, "_summarize_thread_memory", lambda _workspace, _messages: "新的线程摘要")
+
+    created = client.post("/jobs", json=create_job_payload()).json()
+    response = client.post(
+        f"/jobs/{created['id']}/assistant/chat/stream",
+        json={"message": "请帮我分析这个岗位最看重什么"},
+    )
+
+    assert response.status_code == 200
+    assert '"type": "complete"' in response.text
+    assert "第一段回复" in response.text
+
+    thread_response = client.get(f"/jobs/{created['id']}/assistant/thread")
+    thread_data = thread_response.json()
+    assert len(thread_data["messages"]) == 2
+    assert thread_data["messages"][0]["role"] == "user"
+    assert thread_data["messages"][1]["role"] == "assistant"
+    assert thread_data["messages"][1]["content"] == "第一段回复，第二段回复"
+    assert thread_data["summary_text"] == "新的线程摘要"
+
+
+def test_assistant_chat_stream_returns_error_when_llm_unavailable(client, monkeypatch):
+    monkeypatch.setattr(assistant_service, "llm_available", lambda: False)
+    created = client.post("/jobs", json=create_job_payload()).json()
+
+    response = client.post(
+        f"/jobs/{created['id']}/assistant/chat/stream",
+        json={"message": "你好"},
+    )
+
+    assert response.status_code == 200
+    assert '"type": "error"' in response.text
+    assert "DEEPSEEK_API_KEY" in response.text
 
 
 def test_validation_error_for_short_jd(client):

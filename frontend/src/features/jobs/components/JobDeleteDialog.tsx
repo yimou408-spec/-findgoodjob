@@ -22,21 +22,21 @@ export function JobDeleteDialog({ open, job, deleting, onClose, onConfirm }: Job
             <h2 className="card-title">删除岗位</h2>
             <p className="card-subtitle">删除后不可恢复，岗位分析结果也会一并移除。</p>
           </div>
-          <Button variant="ghost" onClick={onClose}>
+          <Button variant="ghost" className="btn-chip" onClick={onClose}>
             关闭
           </Button>
         </div>
 
         <div className="content-box">
-          确认删除岗位《{job.title}》吗？
-          <div className="job-list-meta">公司：{job.company}</div>
+          <div>{`确认删除岗位《${job.title}》吗？`}</div>
+          <div className="job-list-meta">{`公司：${job.company}`}</div>
         </div>
 
-        <div className="inline-actions modal-actions">
-          <Button type="button" variant="ghost" onClick={onClose} disabled={deleting}>
+        <div className="modal-actions-bar">
+          <Button type="button" variant="ghost" className="btn-pill" onClick={onClose} disabled={deleting}>
             取消
           </Button>
-          <Button type="button" className="btn-danger" onClick={() => void onConfirm()} disabled={deleting}>
+          <Button type="button" className="btn-hero btn-danger" onClick={() => void onConfirm()} disabled={deleting}>
             {deleting ? "删除中..." : "确认删除"}
           </Button>
         </div>

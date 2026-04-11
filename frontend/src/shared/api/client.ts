@@ -11,7 +11,7 @@ export class ApiError extends Error {
   }
 }
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 
 type RequestOptions = Omit<RequestInit, "body"> & {
   body?: unknown;
@@ -19,6 +19,16 @@ type RequestOptions = Omit<RequestInit, "body"> & {
 
 function isFormData(body: unknown): body is FormData {
   return typeof FormData !== "undefined" && body instanceof FormData;
+}
+
+export async function parseApiError(response: Response): Promise<ApiError> {
+  const data = response.status === 204 ? null : await response.json().catch(() => null);
+  return new ApiError(
+    data?.detail ?? "请求失败，请稍后重试",
+    response.status,
+    data?.error_code,
+    data?.errors,
+  );
 }
 
 export async function apiRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
@@ -36,16 +46,10 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
     body: body === undefined ? undefined : formDataBody ? body : JSON.stringify(body),
   });
 
-  const data = response.status === 204 ? null : await response.json().catch(() => null);
-
   if (!response.ok) {
-    throw new ApiError(
-      data?.detail ?? "请求失败，请稍后重试",
-      response.status,
-      data?.error_code,
-      data?.errors,
-    );
+    throw await parseApiError(response);
   }
 
+  const data = response.status === 204 ? null : await response.json().catch(() => null);
   return data as T;
 }

@@ -1,22 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
+import { streamAnalyzeJob, streamReviseResume } from "../features/jobs/api";
 import { HealthBadge } from "../features/jobs/components/HealthBadge";
+import { AiAssistantEntry } from "../features/jobs/components/AiAssistantEntry";
 import { JobAnalysisPanel } from "../features/jobs/components/JobAnalysisPanel";
 import { JobCreateModal } from "../features/jobs/components/JobCreateModal";
 import { JobDeleteDialog } from "../features/jobs/components/JobDeleteDialog";
 import { JobDetailPanel } from "../features/jobs/components/JobDetailPanel";
 import { JobListPanel } from "../features/jobs/components/JobListPanel";
 import { ResumeRevisionPanel } from "../features/jobs/components/ResumeRevisionPanel";
-import {
-  useAnalyzeJob,
-  useCreateJob,
-  useDeleteJob,
-  useJob,
-  useJobs,
-  useReviseResume,
-  useUpdateJob,
-} from "../features/jobs/hooks";
-import type { JobCreateInput, JobResponse, ResumeRevisionResponse } from "../features/jobs/types";
+import { useCreateJob, useDeleteJob, useJob, useJobs, useUpdateJob } from "../features/jobs/hooks";
+import type { AnalyzeJobResponse, JobCreateInput, JobResponse, ResumeRevisionResponse } from "../features/jobs/types";
 import { ApiError } from "../shared/api/client";
 import { Button } from "../shared/ui/Button";
 import { EmptyState } from "../shared/ui/EmptyState";
@@ -51,25 +46,27 @@ function toJobForm(job: JobResponse): JobCreateInput {
   return {
     title: job.title,
     company: job.company,
-    source: job.source ?? undefined,
     jd_text: job.jd_text,
   };
 }
 
 export function JobsPage() {
+  const queryClient = useQueryClient();
   const [selectedJobId, setSelectedJobId] = useState<number | null>(() => loadSelectedJobId());
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [editingJob, setEditingJob] = useState<JobResponse | null>(null);
   const [deletingJob, setDeletingJob] = useState<JobResponse | null>(null);
   const [feedback, setFeedback] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [resumeResult, setResumeResult] = useState<ResumeRevisionResponse | null>(null);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [analysisStreamingContent, setAnalysisStreamingContent] = useState("");
+  const [revising, setRevising] = useState(false);
+  const [resumeStreamingContent, setResumeStreamingContent] = useState("");
 
   const jobsQuery = useJobs();
   const createJobMutation = useCreateJob();
   const updateJobMutation = useUpdateJob();
   const deleteJobMutation = useDeleteJob();
-  const analyzeJobMutation = useAnalyzeJob();
-  const reviseResumeMutation = useReviseResume();
   const selectedJobQuery = useJob(selectedJobId);
 
   useEffect(() => {
@@ -156,11 +153,41 @@ export function JobsPage() {
       return;
     }
 
+    setAnalyzing(true);
+    setAnalysisStreamingContent("");
+
     try {
-      await analyzeJobMutation.mutateAsync(selectedJobId);
-      setFeedback({ type: "success", message: "岗位分析已完成，结果已更新到中间工作区。" });
+      const response = await streamAnalyzeJob(selectedJobId, (content) => {
+        setAnalysisStreamingContent(content);
+      });
+
+      queryClient.setQueryData<JobResponse | undefined>(["job", selectedJobId], (previous) =>
+        previous
+          ? {
+              ...previous,
+              analysis_result: response.analysis_result,
+              analysis_improvement_advice: response.analysis_improvement_advice,
+            }
+          : previous,
+      );
+      queryClient.setQueryData<JobResponse[] | undefined>(["jobs"], (previous) =>
+        previous?.map((job) =>
+          job.id === selectedJobId
+            ? {
+                ...job,
+                analysis_result: response.analysis_result,
+                analysis_improvement_advice: response.analysis_improvement_advice,
+              }
+            : job,
+        ),
+      );
+
+      setFeedback({ type: "success", message: "岗位分析已完成，结果已流式生成并同步到工作区。" });
+      setAnalysisStreamingContent("");
     } catch (error) {
       setFeedback({ type: "error", message: getErrorMessage(error) });
+    } finally {
+      setAnalyzing(false);
     }
   }
 
@@ -169,15 +196,21 @@ export function JobsPage() {
       return;
     }
 
+    setRevising(true);
+    setResumeResult(null);
+    setResumeStreamingContent("");
+
     try {
-      const response = await reviseResumeMutation.mutateAsync({
-        jobId: selectedJobId,
-        input: { resume_text: resumeText },
+      const response = await streamReviseResume(selectedJobId, { resume_text: resumeText }, (content) => {
+        setResumeStreamingContent(content);
       });
       setResumeResult(response);
-      setFeedback({ type: "success", message: "简历修订已完成，右侧已同步展示匹配度评分与修订结果。" });
+      setResumeStreamingContent("");
+      setFeedback({ type: "success", message: "简历修订已完成，结果以流式方式生成并同步展示。" });
     } catch (error) {
       setFeedback({ type: "error", message: getErrorMessage(error) });
+    } finally {
+      setRevising(false);
     }
   }
 
@@ -187,7 +220,7 @@ export function JobsPage() {
         <div>
           <h1 className="app-title">FindGoodJob Console</h1>
           <p className="app-subtitle">
-            为当前 FastAPI 后端设计的一体化求职 Agent 工作台。左侧维护岗位流转，中间做岗位分析，右侧直接完成简历修订。
+            面向当前 FastAPI 后端设计的一体化求职工作台。左侧维护岗位流转，中间做岗位分析，右侧直接完成简历修订与匹配度评分。
           </p>
         </div>
         <div className="header-meta">
@@ -196,6 +229,7 @@ export function JobsPage() {
           <StatusPill tone={sessionStats.analyzed > 0 ? "success" : "warning"}>
             已分析 {sessionStats.analyzed} / {sessionStats.total}
           </StatusPill>
+          <AiAssistantEntry />
         </div>
       </header>
 
@@ -212,10 +246,16 @@ export function JobsPage() {
           onSelect={(jobId) => {
             setSelectedJobId(jobId);
             setResumeResult(null);
+            setAnalysisStreamingContent("");
+            setResumeStreamingContent("");
           }}
           onEdit={(job) => setEditingJob(job)}
           onDelete={(job) => setDeletingJob(job)}
-          actions={<Button onClick={() => setCreateModalOpen(true)}>新增岗位</Button>}
+          actions={
+            <Button className="btn-hero btn-full-mobile" onClick={() => setCreateModalOpen(true)}>
+              新增岗位
+            </Button>
+          }
         />
 
         <div className="stack">
@@ -223,14 +263,16 @@ export function JobsPage() {
           <JobAnalysisPanel
             job={selectedJob}
             loading={selectedJobQuery.isLoading}
-            analyzing={analyzeJobMutation.isPending}
+            analyzing={analyzing}
+            streamingContent={analysisStreamingContent}
             onAnalyze={handleAnalyzeJob}
           />
         </div>
 
         <ResumeRevisionPanel
           job={selectedJob}
-          revising={reviseResumeMutation.isPending}
+          revising={revising}
+          streamingContent={resumeStreamingContent}
           result={resumeResult}
           onRevise={handleReviseResume}
         />
@@ -239,9 +281,13 @@ export function JobsPage() {
       {!jobsQuery.isLoading && jobs.length === 0 && (
         <div style={{ marginTop: 18 }}>
           <EmptyState
-            title="推荐先创建一条 AI 产品岗位"
-            description="这个工作台已经连接数据库岗位列表。你可以先创建一条岗位，再立刻分析和修订简历。"
-            action={<Button onClick={() => setCreateModalOpen(true)}>立即创建岗位</Button>}
+            title="推荐先创建一条岗位"
+            description="当前工作台已经连通数据库。你可以先创建一条岗位，再继续做岗位分析和简历修订。"
+            action={
+              <Button className="btn-hero btn-full-mobile" onClick={() => setCreateModalOpen(true)}>
+                立即创建岗位
+              </Button>
+            }
           />
         </div>
       )}

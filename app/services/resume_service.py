@@ -1,18 +1,24 @@
 import logging
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
-from app.agents.job_agent import build_llm, llm_available
+from app.agents.job_agent import build_llm, llm_available, stream_chat_completion
 from app.config import settings
-from app.exceptions import ModelInvocationError
-from app.models import JobDescription
+from app.exceptions import DatabaseError, ModelInvocationError
+from app.models import JobDescription, ResumeRevision
 from app.tools.jd_tools import detect_focus_areas, extract_keywords
 
 logger = logging.getLogger("findgoodjob.resume_service")
 
 MAX_RESUME_CHARS_FOR_LLM = 4000
+MATCH_SCORE_MARKER = "[匹配度评分]"
+MATCH_EXPLANATION_MARKER = "[评分说明]"
+REVISED_RESUME_MARKER = "[修订简历]"
 
 
 @dataclass
@@ -20,6 +26,41 @@ class ResumeRevisionResult:
     revised_resume: str
     match_score: int | None = None
     match_explanation: str | None = None
+
+
+def save_resume_revision_record(
+    db: Session,
+    job: JobDescription,
+    source_resume_text: str,
+    result: ResumeRevisionResult,
+) -> ResumeRevision:
+    record = ResumeRevision(
+        job_id=job.id,
+        source_resume_text=source_resume_text,
+        revised_resume=result.revised_resume,
+        match_score=result.match_score,
+        match_explanation=result.match_explanation,
+    )
+    try:
+        db.add(record)
+        db.commit()
+        db.refresh(record)
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise DatabaseError("保存简历修订记录失败") from exc
+    return record
+
+
+def get_latest_resume_revision(db: Session, job_id: int) -> ResumeRevision | None:
+    try:
+        return (
+            db.query(ResumeRevision)
+            .filter(ResumeRevision.job_id == job_id)
+            .order_by(ResumeRevision.created_at.desc(), ResumeRevision.id.desc())
+            .first()
+        )
+    except SQLAlchemyError as exc:
+        raise DatabaseError("查询最近一次简历修订记录失败") from exc
 
 
 class ResumeRevisionStructuredOutput(BaseModel):
@@ -75,7 +116,7 @@ def _build_resume_revision_fallback(job: JobDescription, resume_text: str) -> Re
     match_score = _estimate_match_score(keywords, resume_text)
     match_explanation = (
         f"评分基于当前简历对岗位关键词和重点方向的覆盖情况生成。"
-        f"当前重点关注 {focus_text}，"
+        f"当前重点关注 {focus_text}；"
         f"明显缺失的关键词包括：{', '.join(missing_keywords) if missing_keywords else '暂无明显缺失'}。"
     )
     revised_resume = (
@@ -144,6 +185,73 @@ def _extract_parse_diagnostics(raw_result: dict) -> str:
         diagnostics.append(f"parsed_type={type(parsed).__name__}")
 
     return "; ".join(diagnostics) or "no diagnostics available"
+
+
+def _format_streaming_output(result: ResumeRevisionResult) -> str:
+    return (
+        f"{MATCH_SCORE_MARKER}\n"
+        f"{result.match_score if result.match_score is not None else '--'}\n\n"
+        f"{MATCH_EXPLANATION_MARKER}\n"
+        f"{(result.match_explanation or '').strip()}\n\n"
+        f"{REVISED_RESUME_MARKER}\n"
+        f"{result.revised_resume.strip()}"
+    )
+
+
+def parse_resume_stream_output(text: str) -> ResumeRevisionResult:
+    normalized = text.replace("\r\n", "\n")
+    score_index = normalized.find(MATCH_SCORE_MARKER)
+    explanation_index = normalized.find(MATCH_EXPLANATION_MARKER)
+    revised_index = normalized.find(REVISED_RESUME_MARKER)
+    if score_index == -1 or explanation_index == -1 or revised_index == -1:
+        raise ValueError("resume stream markers are missing")
+
+    score_block = normalized[score_index + len(MATCH_SCORE_MARKER) : explanation_index].strip()
+    explanation = normalized[explanation_index + len(MATCH_EXPLANATION_MARKER) : revised_index].strip()
+    revised_resume = normalized[revised_index + len(REVISED_RESUME_MARKER) :].strip()
+
+    score_line = next((line.strip() for line in score_block.splitlines() if line.strip()), "")
+    score = int(score_line)
+    if not explanation or not revised_resume:
+        raise ValueError("resume stream content is incomplete")
+
+    return ResumeRevisionResult(
+        revised_resume=revised_resume,
+        match_score=_normalize_match_score(score),
+        match_explanation=explanation,
+    )
+
+
+def build_resume_revision_stream_messages(job: JobDescription, resume_text: str) -> list[dict[str, str]]:
+    return [
+        {
+            "role": "system",
+            "content": (
+                "你是一名资深求职顾问。请使用中文输出，并严格按下面结构返回，不要添加任何额外前言、解释或结尾。\n"
+                "[匹配度评分]\n"
+                "只输出一个 0 到 100 的整数。\n\n"
+                "[评分说明]\n"
+                "用 2 到 3 句话说明当前简历与岗位的匹配情况。\n\n"
+                "[修订简历]\n"
+                "输出修订后的完整简历文本。请只基于用户原简历做增强，不得编造不存在的经历。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"目标岗位：{job.title}\n"
+                f"公司：{job.company}\n"
+                f"岗位 JD：\n{job.jd_text}\n\n"
+                f"岗位分析：\n{job.analysis_result or '暂无岗位分析，请基于 JD 自行判断。'}\n\n"
+                f"原始简历：\n{resume_text}"
+            ),
+        },
+    ]
+
+
+def _chunk_text(text: str, chunk_size: int = 72) -> Iterator[str]:
+    for index in range(0, len(text), chunk_size):
+        yield text[index : index + chunk_size]
 
 
 def revise_resume_for_job(job: JobDescription, resume_text: str) -> ResumeRevisionResult:
@@ -218,3 +326,84 @@ def revise_resume_for_job(job: JobDescription, resume_text: str) -> ResumeRevisi
     diagnostics = _extract_parse_diagnostics(result if isinstance(result, dict) else {})
     logger.error("resume_revision structured_output_failed job_id=%s %s", job_id, diagnostics)
     raise ModelInvocationError(f"DeepSeek 简历修订结构化输出失败: {diagnostics}")
+
+
+async def stream_resume_revision_for_job(job: JobDescription, resume_text: str, db: Session | None = None) -> AsyncIterator[dict]:
+    job_id = getattr(job, "id", "unknown")
+    normalized_resume_text = _trim_resume_text_for_llm(resume_text)
+    yield {"type": "start"}
+
+    if not llm_available():
+        logger.warning("resume_revision mode=fallback job_id=%s reason=missing_deepseek_api_key", job_id)
+        result = _build_resume_revision_fallback(job, normalized_resume_text)
+        content = _format_streaming_output(result)
+        streamed = ""
+        for chunk in _chunk_text(content):
+            streamed += chunk
+            yield {"type": "chunk", "delta": chunk, "content": streamed}
+        if db is not None:
+            save_resume_revision_record(db, job, resume_text, result)
+        yield {
+            "type": "complete",
+            "content": content,
+            "data": {
+                "job_id": job.id,
+                "revised_resume": result.revised_resume,
+                "match_score": result.match_score,
+                "match_explanation": result.match_explanation,
+            },
+        }
+        return
+
+    logger.info(
+        "resume_revision mode=deepseek_stream job_id=%s model=%s timeout=%s resume_chars=%s",
+        job_id,
+        settings.deepseek_model,
+        settings.deepseek_timeout_seconds,
+        len(normalized_resume_text),
+    )
+
+    content = ""
+    received_chunk = False
+    try:
+        messages = build_resume_revision_stream_messages(job, normalized_resume_text)
+        async for chunk in stream_chat_completion(messages, max_tokens=1400):
+            received_chunk = True
+            content += chunk
+            yield {"type": "chunk", "delta": chunk, "content": content}
+        result = parse_resume_stream_output(content)
+        if db is not None:
+            save_resume_revision_record(db, job, resume_text, result)
+        yield {
+            "type": "complete",
+            "content": content,
+            "data": {
+                "job_id": job.id,
+                "revised_resume": result.revised_resume,
+                "match_score": result.match_score,
+                "match_explanation": result.match_explanation,
+            },
+        }
+    except Exception as exc:
+        if not received_chunk:
+            logger.warning("resume_revision mode=fallback job_id=%s reason=%s", job_id, exc)
+            result = _build_resume_revision_fallback(job, normalized_resume_text)
+            content = _format_streaming_output(result)
+            streamed = ""
+            for chunk in _chunk_text(content):
+                streamed += chunk
+                yield {"type": "chunk", "delta": chunk, "content": streamed}
+            if db is not None:
+                save_resume_revision_record(db, job, resume_text, result)
+            yield {
+                "type": "complete",
+                "content": content,
+                "data": {
+                    "job_id": job.id,
+                    "revised_resume": result.revised_resume,
+                    "match_score": result.match_score,
+                    "match_explanation": result.match_explanation,
+                },
+            }
+            return
+        raise ModelInvocationError(f"DeepSeek 简历修订流式输出失败: {exc}") from exc

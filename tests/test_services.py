@@ -50,7 +50,7 @@ class FakeLLM:
 
 def test_job_create_schema_validation():
     with pytest.raises(Exception):
-        JobCreate(title="开发", company="测试", source="Boss", jd_text="太短了")
+        JobCreate(title="开发", company="测试", jd_text="太短了")
 
 
 def test_resume_request_validation():
@@ -69,7 +69,6 @@ def test_analyze_job_with_fallback(db_session, monkeypatch):
         JobCreate(
             title="AI Agent 开发工程师",
             company="测试公司",
-            source="Boss",
             jd_text="岗位职责：使用 LangChain 和 Python 构建 Agent 系统，熟悉 RAG 和 FastAPI。",
         ),
     )
@@ -87,7 +86,6 @@ def test_analyze_job_with_mock_llm(db_session, monkeypatch):
         JobCreate(
             title="AI Agent 开发工程师",
             company="测试公司",
-            source="Boss",
             jd_text="岗位职责：使用 LangChain 和 Python 构建 Agent 系统，熟悉 RAG 和 FastAPI。",
         ),
     )

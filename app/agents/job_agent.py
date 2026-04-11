@@ -1,4 +1,5 @@
 import json
+from collections.abc import AsyncIterator
 
 import httpx
 from langchain_core.prompts import ChatPromptTemplate
@@ -32,6 +33,10 @@ def build_llm() -> ChatDeepSeek:
     )
 
 
+def _build_api_url() -> str:
+    return f"{settings.deepseek_base_url.rstrip('/')}/chat/completions"
+
+
 def _parse_json_content(content: str) -> dict:
     text = content.strip()
     start = text.find("{")
@@ -39,6 +44,79 @@ def _parse_json_content(content: str) -> dict:
     if start == -1 or end == -1 or end <= start:
         raise ValueError("model did not return a JSON object")
     return json.loads(text[start : end + 1])
+
+
+def build_job_analysis_stream_messages(jd_text: str) -> list[dict[str, str]]:
+    keywords = ", ".join(extract_keywords(jd_text))
+    focus = "、".join(detect_focus_areas(jd_text))
+    summary = summarize_job(jd_text)
+
+    return [
+        {
+            "role": "system",
+            "content": (
+                "你是岗位分析专家。请使用中文输出，并且严格按下面结构返回，不要添加任何额外前言、结尾或解释。\n"
+                "[分析摘要]\n"
+                "用 3 到 5 条要点总结岗位核心职责、关键技能和适合候选人重点强调的能力。\n\n"
+                "[改进建议]\n"
+                "输出至少 2 条面向简历优化的建议，每条单独一行，以 - 开头。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"岗位 JD：\n{jd_text}\n\n"
+                f"辅助信息：\n关键词：{keywords}\n"
+                f"岗位重点方向：{focus}\n"
+                f"岗位摘要：{summary}"
+            ),
+        },
+    ]
+
+
+async def stream_chat_completion(messages: list[dict[str, str]], max_tokens: int) -> AsyncIterator[str]:
+    if not llm_available():
+        raise ModelInvocationError("未配置 DEEPSEEK_API_KEY，无法调用 DeepSeek 模型。")
+
+    headers = {
+        "Authorization": f"Bearer {settings.deepseek_api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": settings.deepseek_model,
+        "messages": messages,
+        "temperature": 0.2,
+        "max_tokens": max_tokens,
+        "stream": True,
+    }
+
+    async with httpx.AsyncClient(trust_env=False, timeout=settings.deepseek_timeout_seconds) as client:
+        try:
+            async with client.stream("POST", _build_api_url(), headers=headers, json=payload) as response:
+                if response.status_code >= 400:
+                    detail = await response.aread()
+                    raise ModelInvocationError(f"DeepSeek 流式调用失败: {detail.decode('utf-8', errors='ignore')}")
+
+                async for line in response.aiter_lines():
+                    stripped = line.strip()
+                    if not stripped.startswith("data:"):
+                        continue
+
+                    data = stripped[5:].strip()
+                    if data == "[DONE]":
+                        break
+
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+
+                    delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
+                    content = delta.get("content")
+                    if isinstance(content, str) and content:
+                        yield content
+        except httpx.HTTPError as exc:
+            raise ModelInvocationError(f"DeepSeek 流式调用失败: {exc}") from exc
 
 
 class JobAnalysisAgent:
