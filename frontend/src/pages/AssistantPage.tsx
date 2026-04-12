@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { getAssistantThread, streamAssistantChat } from "../features/jobs/api";
@@ -42,7 +42,29 @@ function buildOptimisticAssistantMessage(): AssistantMessage {
     content: "",
     sequence: Number.MAX_SAFE_INTEGER,
     created_at: null,
+    retrieval_note: null,
+    source_links: [],
   };
+}
+
+function renderMessageContent(content: string) {
+  const parts = content.split(/(https?:\/\/[^\s]+)/g);
+  return parts.map((part, index) => {
+    if (/^https?:\/\/[^\s]+$/.test(part)) {
+      return (
+        <a
+          key={`${part}-${index}`}
+          href={part}
+          target="_blank"
+          rel="noreferrer"
+          className="assistant-inline-link"
+        >
+          {part}
+        </a>
+      );
+    }
+    return <Fragment key={`text-${index}`}>{part}</Fragment>;
+  });
 }
 
 export function AssistantPage() {
@@ -202,6 +224,9 @@ export function AssistantPage() {
           <p className="app-subtitle">把岗位理解、简历优化、投递准备和面试问题放进一个连续对话里推进。</p>
         </div>
         <div className="assistant-page-header-actions">
+          <Link to="/knowledge-base" className="btn btn-ghost btn-pill assistant-back-link">
+            知识库管理
+          </Link>
           <StatusPill tone={thread?.can_chat ? "success" : "warning"}>
             {thread?.can_chat ? "DeepSeek 已连接" : "助手未配置"}
           </StatusPill>
@@ -246,7 +271,30 @@ export function AssistantPage() {
                       <span />
                     </div>
                   ) : (
-                    <div className="assistant-chat-content">{message.content}</div>
+                    <>
+                      {message.role === "assistant" && message.retrieval_note ? (
+                        <div className="assistant-retrieval-strip">{message.retrieval_note}</div>
+                      ) : null}
+                      <div className="assistant-chat-content">{renderMessageContent(message.content)}</div>
+                      {message.role === "assistant" && (message.source_links?.length ?? 0) > 0 ? (
+                        <div className="assistant-source-links">
+                          <div className="assistant-source-links-label">参考来源</div>
+                          <div className="assistant-source-links-list">
+                            {message.source_links?.map((link) => (
+                              <a
+                                key={link}
+                                href={link}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="assistant-inline-link"
+                              >
+                                {link}
+                              </a>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
+                    </>
                   )}
                 </article>
               ))}

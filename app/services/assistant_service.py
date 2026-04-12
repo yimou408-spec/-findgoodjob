@@ -6,31 +6,121 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.agents.job_agent import build_llm, llm_available, stream_chat_completion
-from app.config import settings
 from app.exceptions import DatabaseError, ModelInvocationError
-from app.models import AssistantMessage, AssistantThread, JobDescription
+from app.models import AssistantMessage, AssistantThread, JobDescription, KnowledgeDocument
 from app.schemas import (
     AssistantChatResponse,
     AssistantMessageResponse,
     AssistantThreadResponse,
+    JobKnowledgeReindexResponse,
+    JobKnowledgeResponse,
+    KnowledgeDocumentSummaryResponse,
     ResumeRevisionRecordResponse,
 )
+from app.services.interview_knowledge_service import (
+    collect_interview_source_links,
+    format_interview_rag_context,
+    search_interview_knowledge,
+)
+from app.services import embedding_service
+from app.services.knowledge_service import build_retrieval_context, get_job_knowledge_stats, index_job_workspace
+from app.services.llm_output_service import normalize_model_output, normalize_streaming_content
 from app.services.resume_service import get_latest_resume_revision
 
 logger = logging.getLogger("findgoodjob.assistant_service")
 
 MAX_RECENT_MESSAGES = 10
 MAX_SUMMARY_SOURCE_MESSAGES = 24
+RETRIEVAL_NOTICE_MARKER = "本轮增强检索："
+SOURCE_LINKS_MARKER = "参考来源链接："
+
+
+def _safe_strip(value: str | None) -> str:
+    return normalize_model_output(value or "").strip()
+
+
+def _find_interview_search_hits(db: Session, job: JobDescription, query: str):
+    normalized_job_company = _safe_strip(job.company)
+    normalized_job_title = _safe_strip(job.title)
+    response = search_interview_knowledge(
+        db,
+        query,
+        company=normalized_job_company or None,
+        role=normalized_job_title or None,
+        top_k=3,
+    )
+    if response.result_count > 0:
+        logger.info(
+            "assistant_interview_search_hit job_company=%s job_title=%s result_count=%s",
+            normalized_job_company,
+            normalized_job_title,
+            response.result_count,
+        )
+    else:
+        logger.info(
+            "assistant_interview_search_miss job_company=%s job_title=%s scope=current_job_only",
+            normalized_job_company,
+            normalized_job_title,
+        )
+    return response
+
+
+def _split_assistant_display_content(content: str) -> tuple[str, str | None, list[str]]:
+    normalized = normalize_model_output(content)
+    source_links: list[str] = []
+    retrieval_note: str | None = None
+    main_content = normalized
+
+    if SOURCE_LINKS_MARKER in main_content:
+        body, links_block = main_content.split(SOURCE_LINKS_MARKER, 1)
+        main_content = body.rstrip()
+        for raw_line in links_block.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if ". " in line:
+                maybe_link = line.split(". ", 1)[1].strip()
+            else:
+                maybe_link = line
+            if maybe_link.startswith("http://") or maybe_link.startswith("https://"):
+                source_links.append(maybe_link)
+
+    if RETRIEVAL_NOTICE_MARKER in main_content:
+        prefix, remainder = main_content.split(RETRIEVAL_NOTICE_MARKER, 1)
+        remainder = remainder.lstrip()
+        segments = remainder.split("\n\n", 1)
+        retrieval_note = segments[0].strip() or None
+        main_content = segments[1].strip() if len(segments) > 1 else prefix.strip()
+        if prefix.strip() and len(segments) <= 1:
+            main_content = prefix.strip()
+
+    return main_content.strip(), retrieval_note, source_links
 
 
 def _message_to_response(message: AssistantMessage) -> AssistantMessageResponse:
     created_at = message.created_at.isoformat() if message.created_at else None
+    content, retrieval_note, source_links = _split_assistant_display_content(message.content)
     return AssistantMessageResponse(
         id=message.id,
         role=message.role,
-        content=message.content,
+        content=content,
         sequence=message.sequence,
         created_at=created_at,
+        retrieval_note=retrieval_note if message.role == "assistant" else None,
+        source_links=source_links if message.role == "assistant" else [],
+    )
+
+
+def _document_to_response(document: KnowledgeDocument) -> KnowledgeDocumentSummaryResponse:
+    created_at = document.created_at.isoformat() if document.created_at else None
+    updated_at = document.updated_at.isoformat() if document.updated_at else None
+    return KnowledgeDocumentSummaryResponse(
+        id=document.id,
+        source_type=document.source_type,
+        source_key=document.source_key,
+        title=document.title,
+        created_at=created_at,
+        updated_at=updated_at,
     )
 
 
@@ -83,7 +173,7 @@ def _build_workspace_summary(job: JobDescription, latest_revision) -> str:
             ]
         )
 
-    return "\n".join(parts).strip()
+    return normalize_model_output("\n".join(parts))
 
 
 def _build_summary_fallback(messages: list[AssistantMessage]) -> str:
@@ -102,7 +192,7 @@ def _build_summary_fallback(messages: list[AssistantMessage]) -> str:
         "助手最近建议：",
         "；".join(recent_assistant_outputs[-2:]) or "暂无。",
     ]
-    return "\n".join(summary_parts).strip()
+    return normalize_model_output("\n".join(summary_parts))
 
 
 def _build_messages_for_summary(workspace_summary: str, messages: list[AssistantMessage]) -> str:
@@ -122,9 +212,10 @@ def _summarize_thread_memory(workspace_summary: str, messages: list[AssistantMes
             (
                 "system",
                 (
-                    "你是求职助手的记忆整理器。请基于工作台摘要和最近对话，用中文输出一份可供后续对话复用的简洁摘要。"
+                    "你是求职助手的记忆整理器。请基于工作台摘要和最近对话，输出一份可供后续对话复用的简洁摘要。"
+                    "一般情况下使用中文自然表达；遇到英文书名、网站名、产品名、框架名、模型名、技术术语或行业通用专有名词时保留原文。"
                     "只保留高价值信息：用户目标、简历弱项、偏好、已给建议、待办动作、风险点。"
-                    "不要编造信息，不要输出多余寒暄。"
+                    "不要编造信息，也不要使用 Markdown 强调、星号列表或井号标题。"
                 ),
             ),
             ("human", "{content}"),
@@ -135,9 +226,9 @@ def _summarize_thread_memory(workspace_summary: str, messages: list[AssistantMes
         llm = build_llm().bind(max_tokens=500)
         result = (prompt | llm).invoke({"content": _build_messages_for_summary(workspace_summary, messages)})
         content = result.content if hasattr(result, "content") else str(result)
-        normalized = content.strip()
+        normalized = normalize_model_output(content)
         return normalized or _build_summary_fallback(messages)
-    except Exception as exc:  # pragma: no cover - fallback path
+    except Exception as exc:  # pragma: no cover
         logger.warning("assistant_summary fallback reason=%s", exc)
         return _build_summary_fallback(messages)
 
@@ -145,6 +236,7 @@ def _summarize_thread_memory(workspace_summary: str, messages: list[AssistantMes
 def _build_assistant_messages(
     workspace_summary: str,
     summary_text: str | None,
+    retrieval_context: str,
     recent_messages: list[AssistantMessage],
     user_message: str,
 ) -> list[dict[str, str]]:
@@ -152,10 +244,13 @@ def _build_assistant_messages(
         {
             "role": "system",
             "content": (
-                "你是 FindGoodJob 的 AI 求职助手。请使用中文回答，基于用户当前岗位上下文、岗位分析、简历修订结果和历史对话给出建议。"
+                "你是 FindGoodJob 的 AI 求职助手。"
+                "请基于用户当前岗位上下文、岗位分析、简历修订结果、历史对话和检索到的知识片段给出建议。"
+                "一般情况下使用中文自然表达；但遇到英文书名、网站名、产品名、框架名、模型名、技术术语或行业通用专有名词时，保留原文。"
                 "不要编造不存在的经历、项目、结果或面试反馈。"
                 "如果信息不足，明确指出缺失信息并告诉用户下一步该补什么。"
-                "回答应偏专业、可执行、适合真实求职场景。"
+                "回答应专业、可执行、适合真实求职场景。"
+                "不要使用 Markdown 强调符号、星号列表、井号标题或其他装饰性格式。"
             ),
         },
         {"role": "system", "content": f"[岗位工作台摘要]\n{workspace_summary}"},
@@ -163,12 +258,21 @@ def _build_assistant_messages(
 
     if summary_text:
         messages.append({"role": "system", "content": f"[线程记忆摘要]\n{summary_text}"})
+    if retrieval_context:
+        messages.append({"role": "system", "content": f"[岗位知识库检索结果]\n{retrieval_context}"})
 
     for message in recent_messages:
         messages.append({"role": message.role, "content": message.content})
 
     messages.append({"role": "user", "content": user_message})
     return messages
+
+
+def _append_source_links(content: str, source_links: list[str]) -> str:
+    if not source_links:
+        return content
+    lines = [f"{index}. {link}" for index, link in enumerate(source_links, start=1)]
+    return normalize_model_output(f"{content}\n\n参考来源链接：\n" + "\n".join(lines))
 
 
 def get_or_create_assistant_thread(db: Session, job: JobDescription) -> AssistantThread:
@@ -213,10 +317,11 @@ def _next_sequence(db: Session, thread_id: int) -> int:
 
 
 def save_assistant_message(db: Session, thread: AssistantThread, role: str, content: str) -> AssistantMessage:
+    normalized_content = normalize_model_output(content)
     message = AssistantMessage(
         thread_id=thread.id,
         role=role,
-        content=content.strip(),
+        content=normalized_content,
         sequence=_next_sequence(db, thread.id),
     )
     try:
@@ -260,6 +365,10 @@ def refresh_thread_summary(db: Session, thread: AssistantThread) -> str:
 def get_assistant_thread_state(db: Session, job: JobDescription) -> AssistantThreadResponse:
     thread = get_or_create_assistant_thread(db, job)
     workspace_summary = refresh_workspace_summary(db, thread, job)
+    if embedding_service.zhipu_embedding_available():
+        knowledge_stats = index_job_workspace(db, job)
+    else:
+        knowledge_stats = get_job_knowledge_stats(db, job.id)
     messages = list_thread_messages(db, thread.id)
     if messages and not thread.summary_text:
         refresh_thread_summary(db, thread)
@@ -273,12 +382,45 @@ def get_assistant_thread_state(db: Session, job: JobDescription) -> AssistantThr
         workspace_summary=workspace_summary,
         messages=[_message_to_response(message) for message in messages],
         latest_resume_revision=_resume_revision_to_response(latest_revision),
+        knowledge_document_count=knowledge_stats.document_count,
+        knowledge_chunk_count=knowledge_stats.chunk_count,
+    )
+
+
+def get_job_knowledge_state(db: Session, job: JobDescription) -> JobKnowledgeResponse:
+    if embedding_service.zhipu_embedding_available():
+        stats = index_job_workspace(db, job)
+    else:
+        stats = get_job_knowledge_stats(db, job.id)
+    documents = (
+        db.query(KnowledgeDocument)
+        .filter(KnowledgeDocument.job_id == job.id)
+        .order_by(KnowledgeDocument.updated_at.desc(), KnowledgeDocument.id.desc())
+        .all()
+    )
+    return JobKnowledgeResponse(
+        knowledge_base_id=stats.knowledge_base_id,
+        job_id=job.id,
+        document_count=stats.document_count,
+        chunk_count=stats.chunk_count,
+        documents=[_document_to_response(document) for document in documents],
+    )
+
+
+def reindex_job_knowledge(db: Session, job: JobDescription) -> JobKnowledgeReindexResponse:
+    stats = index_job_workspace(db, job)
+    return JobKnowledgeReindexResponse(
+        knowledge_base_id=stats.knowledge_base_id,
+        job_id=job.id,
+        document_count=stats.document_count,
+        chunk_count=stats.chunk_count,
     )
 
 
 async def stream_assistant_chat(db: Session, job: JobDescription, message: str) -> AsyncIterator[dict]:
     thread = get_or_create_assistant_thread(db, job)
     workspace_summary = refresh_workspace_summary(db, thread, job)
+    index_job_workspace(db, job)
     user_message = save_assistant_message(db, thread, "user", message)
 
     yield {"type": "start"}
@@ -287,9 +429,16 @@ async def stream_assistant_chat(db: Session, job: JobDescription, message: str) 
         raise ModelInvocationError("未配置 DEEPSEEK_API_KEY，无法使用求职助手。", error_code="assistant_llm_unavailable")
 
     recent_messages = list_thread_messages(db, thread.id)[-MAX_RECENT_MESSAGES:]
+    job_retrieval_context = build_retrieval_context(db, job.id, user_message.content)
+    interview_search_response = _find_interview_search_hits(db, job, user_message.content)
+    interview_retrieval_context = format_interview_rag_context(interview_search_response)
+    retrieval_context = "\n\n".join(
+        part for part in [job_retrieval_context, interview_retrieval_context] if part and part.strip()
+    )
     prompt_messages = _build_assistant_messages(
         workspace_summary=workspace_summary,
         summary_text=thread.summary_text,
+        retrieval_context=retrieval_context,
         recent_messages=recent_messages[:-1],
         user_message=user_message.content,
     )
@@ -297,13 +446,31 @@ async def stream_assistant_chat(db: Session, job: JobDescription, message: str) 
     logger.info("assistant_chat mode=deepseek_stream job_id=%s thread_id=%s", job.id, thread.id)
 
     content = ""
-    async for chunk in stream_chat_completion(prompt_messages, max_tokens=1200):
+    previous_normalized = ""
+    async for chunk in stream_chat_completion(prompt_messages, max_tokens=2200):
         content += chunk
-        yield {"type": "chunk", "delta": chunk, "content": content}
+        normalized_content = normalize_streaming_content(content)
+        delta = normalized_content[len(previous_normalized) :] if normalized_content.startswith(previous_normalized) else ""
+        previous_normalized = normalized_content
+        yield {"type": "chunk", "delta": delta, "content": normalized_content}
 
-    normalized_content = content.strip()
+    normalized_content = normalize_model_output(content)
     if not normalized_content:
         raise ModelInvocationError("DeepSeek 未返回有效助手回复。", error_code="assistant_empty_response")
+
+    source_links = collect_interview_source_links(interview_search_response, top_k=3)
+    retrieval_notice_parts: list[str] = []
+    if job_retrieval_context.strip():
+        retrieval_notice_parts.append("已参考当前岗位工作台知识。")
+    if interview_search_response.result_count > 0:
+        retrieval_notice_parts.append(f"已命中 {interview_search_response.result_count} 条面经知识来源。")
+    else:
+        retrieval_notice_parts.append("当前岗位强相关面经知识不足，本轮未引入其他岗位知识。")
+    if retrieval_notice_parts:
+        normalized_content = normalize_model_output(
+            "本轮增强检索：\n" + "\n".join(retrieval_notice_parts) + f"\n\n{normalized_content}"
+        )
+    normalized_content = _append_source_links(normalized_content, source_links)
 
     assistant_message = save_assistant_message(db, thread, "assistant", normalized_content)
     summary_text = refresh_thread_summary(db, thread)

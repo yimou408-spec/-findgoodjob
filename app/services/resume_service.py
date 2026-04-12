@@ -11,6 +11,7 @@ from app.agents.job_agent import build_llm, llm_available, stream_chat_completio
 from app.config import settings
 from app.exceptions import DatabaseError, ModelInvocationError
 from app.models import JobDescription, ResumeRevision
+from app.services.llm_output_service import normalize_model_output, normalize_streaming_content
 from app.tools.jd_tools import detect_focus_areas, extract_keywords
 
 logger = logging.getLogger("findgoodjob.resume_service")
@@ -37,9 +38,9 @@ def save_resume_revision_record(
     record = ResumeRevision(
         job_id=job.id,
         source_resume_text=source_resume_text,
-        revised_resume=result.revised_resume,
+        revised_resume=normalize_model_output(result.revised_resume),
         match_score=result.match_score,
-        match_explanation=result.match_explanation,
+        match_explanation=normalize_model_output(result.match_explanation or ""),
     )
     try:
         db.add(record)
@@ -114,25 +115,29 @@ def _build_resume_revision_fallback(job: JobDescription, resume_text: str) -> Re
     focus_text = "、".join(focus)
     missing_keywords = [keyword for keyword in keywords if keyword.lower() not in resume_text.lower()][:5]
     match_score = _estimate_match_score(keywords, resume_text)
-    match_explanation = (
-        f"评分基于当前简历对岗位关键词和重点方向的覆盖情况生成。"
-        f"当前重点关注 {focus_text}；"
-        f"明显缺失的关键词包括：{', '.join(missing_keywords) if missing_keywords else '暂无明显缺失'}。"
+    match_explanation = normalize_model_output(
+        (
+            f"评分基于当前简历对岗位关键词和重点方向的覆盖情况生成。"
+            f"当前重点关注 {focus_text}。"
+            f"明显缺失的关键词包括：{', '.join(missing_keywords) if missing_keywords else '暂无明显缺失'}。"
+        )
     )
-    revised_resume = (
-        "1. 岗位匹配度判断\n"
-        f"- 当前简历与目标岗位《{job.title}》存在基础匹配，但需要更突出与岗位直接相关的经验。\n\n"
-        "2. 关键差距\n"
-        f"- 当前简历对以下关键词体现不足：{', '.join(missing_keywords) if missing_keywords else '暂无明显缺失'}\n"
-        f"- 岗位重点方向包括：{focus_text}\n\n"
-        "3. 优化建议\n"
-        f"- 在项目经历中补充与 {focus_text} 相关的具体实践\n"
-        "- 使用结果导向语言描述技能与产出\n"
-        f"- 将以下关键词自然融入简历：{', '.join(keywords)}\n\n"
-        "4. 修订后的简历文本\n"
-        f"{resume_text}\n\n"
-        "【建议重写方向】\n"
-        f"应突出与 {job.title} 最相关的项目、技术栈和业务成果，并保持内容真实可验证。"
+    revised_resume = normalize_model_output(
+        (
+            "1. 岗位匹配度判断\n"
+            f"当前简历与目标岗位《{job.title}》存在基础匹配，但需要更突出与岗位直接相关的经验。\n\n"
+            "2. 关键差距\n"
+            f"当前简历对以下关键词体现不足：{', '.join(missing_keywords) if missing_keywords else '暂无明显缺失'}\n"
+            f"岗位重点方向包括：{focus_text}\n\n"
+            "3. 优化建议\n"
+            f"在项目经历中补充与 {focus_text} 相关的具体实践\n"
+            "使用结果导向语言描述技能与产出\n"
+            f"将以下关键词自然融入简历：{', '.join(keywords)}\n\n"
+            "4. 修订后的简历文本\n"
+            f"{resume_text}\n\n"
+            "建议重写方向：\n"
+            f"应突出与 {job.title} 最相关的项目、技术栈和业务成果，并保持内容真实可验证。"
+        )
     )
     return ResumeRevisionResult(
         revised_resume=revised_resume,
@@ -142,11 +147,11 @@ def _build_resume_revision_fallback(job: JobDescription, resume_text: str) -> Re
 
 
 def _coerce_structured_result(parsed: ResumeRevisionStructuredOutput) -> ResumeRevisionResult:
-    revised_resume = parsed.revised_resume.strip()
+    revised_resume = normalize_model_output(parsed.revised_resume)
     if not revised_resume:
         raise ValueError("revised_resume is empty")
 
-    match_explanation = parsed.match_explanation.strip()
+    match_explanation = normalize_model_output(parsed.match_explanation)
     if not match_explanation:
         raise ValueError("match_explanation is empty")
 
@@ -178,7 +183,7 @@ def _extract_parse_diagnostics(raw_result: dict) -> str:
 
         content = getattr(raw_message, "content", "")
         if isinstance(content, str) and content.strip():
-            preview = content.strip().replace("\n", " ")
+            preview = normalize_model_output(content).replace("\n", " ")
             diagnostics.append(f"raw_preview={preview[:240]}")
 
     if parsed is not None:
@@ -192,14 +197,14 @@ def _format_streaming_output(result: ResumeRevisionResult) -> str:
         f"{MATCH_SCORE_MARKER}\n"
         f"{result.match_score if result.match_score is not None else '--'}\n\n"
         f"{MATCH_EXPLANATION_MARKER}\n"
-        f"{(result.match_explanation or '').strip()}\n\n"
+        f"{normalize_model_output(result.match_explanation or '')}\n\n"
         f"{REVISED_RESUME_MARKER}\n"
-        f"{result.revised_resume.strip()}"
+        f"{normalize_model_output(result.revised_resume)}"
     )
 
 
 def parse_resume_stream_output(text: str) -> ResumeRevisionResult:
-    normalized = text.replace("\r\n", "\n")
+    normalized = normalize_model_output(text).replace("\r\n", "\n")
     score_index = normalized.find(MATCH_SCORE_MARKER)
     explanation_index = normalized.find(MATCH_EXPLANATION_MARKER)
     revised_index = normalized.find(REVISED_RESUME_MARKER)
@@ -216,9 +221,9 @@ def parse_resume_stream_output(text: str) -> ResumeRevisionResult:
         raise ValueError("resume stream content is incomplete")
 
     return ResumeRevisionResult(
-        revised_resume=revised_resume,
+        revised_resume=normalize_model_output(revised_resume),
         match_score=_normalize_match_score(score),
-        match_explanation=explanation,
+        match_explanation=normalize_model_output(explanation),
     )
 
 
@@ -227,7 +232,9 @@ def build_resume_revision_stream_messages(job: JobDescription, resume_text: str)
         {
             "role": "system",
             "content": (
-                "你是一名资深求职顾问。请使用中文输出，并严格按下面结构返回，不要添加任何额外前言、解释或结尾。\n"
+                "你是一名资深求职顾问。请一般情况下使用中文自然表达，"
+                "但遇到英文书名、网站名、产品名、框架名、模型名、技术术语或行业通用专有名词时保留原文。"
+                "请严格按下面结构返回，不要添加任何额外前言、解释或结尾，也不要使用 Markdown 强调、星号列表或井号标题。\n"
                 "[匹配度评分]\n"
                 "只输出一个 0 到 100 的整数。\n\n"
                 "[评分说明]\n"
@@ -286,7 +293,9 @@ def revise_resume_for_job(job: JobDescription, resume_text: str) -> ResumeRevisi
                         "你是一名资深求职顾问。"
                         "你的任务是基于当前简历与目标岗位的匹配情况，给出修订后的简历和匹配度评分。"
                         "匹配度评分必须针对当前简历与岗位的匹配程度，而不是针对岗位 JD 本身。"
+                        "一般情况下使用中文自然表达；遇到英文书名、网站名、产品名、框架名、模型名、技术术语或行业通用专有名词时保留原文。"
                         "请保持内容真实，不得编造不存在的项目、经历或成果。"
+                        "不要使用 Markdown 强调、星号列表或井号标题。"
                         "修订后的简历请控制在精炼、可直接投递的长度。"
                     ),
                 ),
@@ -364,19 +373,24 @@ async def stream_resume_revision_for_job(job: JobDescription, resume_text: str, 
     )
 
     content = ""
+    previous_normalized = ""
     received_chunk = False
     try:
         messages = build_resume_revision_stream_messages(job, normalized_resume_text)
         async for chunk in stream_chat_completion(messages, max_tokens=1400):
             received_chunk = True
             content += chunk
-            yield {"type": "chunk", "delta": chunk, "content": content}
+            normalized_content = normalize_streaming_content(content)
+            delta = normalized_content[len(previous_normalized) :] if normalized_content.startswith(previous_normalized) else ""
+            previous_normalized = normalized_content
+            yield {"type": "chunk", "delta": delta, "content": normalized_content}
         result = parse_resume_stream_output(content)
+        final_content = _format_streaming_output(result)
         if db is not None:
             save_resume_revision_record(db, job, resume_text, result)
         yield {
             "type": "complete",
-            "content": content,
+            "content": final_content,
             "data": {
                 "job_id": job.id,
                 "revised_resume": result.revised_resume,

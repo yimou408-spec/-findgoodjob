@@ -1,0 +1,90 @@
+@baseUrl = http://127.0.0.1:8000
+
+### 健康检查
+GET {{baseUrl}}/health
+
+### 手工导入面经
+POST {{baseUrl}}/knowledge/import/manual
+Content-Type: application/json
+
+{
+  "items": [
+    {
+      "source_id": "note-001",
+      "url": "https://www.xiaohongshu.com/explore/note-001",
+      "title": "美团产品经理一面面经",
+      "author_name": "候选人A",
+      "published_at": "2026-04-10T10:00:00+08:00",
+      "company": "美团",
+      "role": "产品经理",
+      "interview_stage": "一面",
+      "city": "北京",
+      "tags": ["产品经理", "面经", "校招"],
+      "quality_score": 85,
+      "content_raw": "美团产品经理一面主要问用户增长、需求拆解、竞品分析，还会要求候选人做反问。",
+      "content_summary": "美团产品经理一面重点考察用户增长、需求拆解和竞品分析。",
+      "metadata": {
+        "collector": "manual",
+        "remark": "人工整理"
+      }
+    }
+  ]
+}
+
+### 研究数据导入
+POST {{baseUrl}}/knowledge/import/xiaohongshu-research
+Content-Type: application/json
+
+{
+  "items": [
+    {
+      "source_id": "research-note-001",
+      "url": "https://www.xiaohongshu.com/explore/research-note-001",
+      "title": "阿里面试复盘",
+      "author_name": "研究样本A",
+      "published_at": "2026-04-09T09:00:00+08:00",
+      "crawl_at": "2026-04-12T15:00:00+08:00",
+      "company": "阿里",
+      "role": "产品经理",
+      "interview_stage": "二面",
+      "city": "杭州",
+      "tags": ["阿里", "产品经理", "二面"],
+      "quality_score": 78,
+      "content_raw": "阿里产品经理二面更关注业务理解、数据分析和项目推进，追问会比较深入。",
+      "content_summary": "阿里产品经理二面偏业务理解和深入追问。",
+      "metadata": {
+        "collector": "research",
+        "remark": "公开页研究样本"
+      }
+    }
+  ]
+}
+
+### 小红书链接自动编译入库
+POST {{baseUrl}}/knowledge/compile-links/xiaohongshu
+Content-Type: application/json
+
+{
+  "links": [
+    "https://www.xiaohongshu.com/explore/note-001",
+    "https://www.xiaohongshu.com/explore/note-002"
+  ],
+  "default_company": "美团",
+  "default_role": "产品经理",
+  "default_city": "北京"
+}
+
+### 搜索知识库
+GET {{baseUrl}}/knowledge/search?query=美团产品经理一面问什么&company=美团&role=产品经理&top_k=4
+
+### 助手 RAG 检索预览
+POST {{baseUrl}}/assistant/rag/search
+Content-Type: application/json
+
+{
+  "message": "美团产品经理一面常问什么",
+  "company": "美团",
+  "role": "产品经理",
+  "interview_stage": "一面",
+  "top_k": 4
+}

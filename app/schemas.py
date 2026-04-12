@@ -65,6 +65,8 @@ class AssistantMessageResponse(BaseModel):
     content: str
     sequence: int
     created_at: str | None = None
+    retrieval_note: str | None = None
+    source_links: list[str] = []
 
     model_config = {"from_attributes": True}
 
@@ -77,6 +79,8 @@ class AssistantThreadResponse(BaseModel):
     workspace_summary: str
     messages: list[AssistantMessageResponse]
     latest_resume_revision: ResumeRevisionRecordResponse | None = None
+    knowledge_document_count: int = 0
+    knowledge_chunk_count: int = 0
 
 
 class AssistantChatRequest(BaseModel):
@@ -89,3 +93,163 @@ class AssistantChatResponse(BaseModel):
     message: AssistantMessageResponse
     summary_text: str | None
     workspace_summary: str
+
+
+class KnowledgeDocumentSummaryResponse(BaseModel):
+    id: int
+    source_type: str
+    source_key: str | None = None
+    title: str
+    created_at: str | None = None
+    updated_at: str | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class JobKnowledgeResponse(BaseModel):
+    knowledge_base_id: int
+    job_id: int
+    document_count: int
+    chunk_count: int
+    documents: list[KnowledgeDocumentSummaryResponse]
+
+
+class JobKnowledgeReindexResponse(BaseModel):
+    knowledge_base_id: int
+    job_id: int
+    document_count: int
+    chunk_count: int
+
+
+class InterviewKnowledgeImportItem(BaseModel):
+    source_id: str | None = None
+    url: str | None = None
+    title: str | None = None
+    author_name: str | None = None
+    published_at: str | None = None
+    crawl_at: str | None = None
+    company: str | None = None
+    role: str | None = None
+    interview_stage: str | None = None
+    city: str | None = None
+    tags: list[str] = []
+    quality_score: int | None = None
+    content_raw: str = Field(..., min_length=20)
+    content_summary: str | None = None
+    metadata: dict | None = None
+
+
+class InterviewKnowledgeImportRequest(BaseModel):
+    items: list[InterviewKnowledgeImportItem] = Field(..., min_length=1)
+
+
+class InterviewKnowledgeSourceResponse(BaseModel):
+    id: int
+    source_platform: str
+    source_type: str
+    source_id: str | None = None
+    url: str | None = None
+    title: str | None = None
+    author_name: str | None = None
+    published_at: str | None = None
+    crawl_at: str | None = None
+    ingest_at: str | None = None
+    company: str | None = None
+    role: str | None = None
+    interview_stage: str | None = None
+    city: str | None = None
+    tags: list[str] = []
+    quality_score: int | None = None
+    compliance_status: str
+    content_clean: str
+    content_summary: str
+    updated_at: str | None = None
+    chunk_count: int = 0
+    embedding_ready: bool = False
+
+
+class InterviewKnowledgeImportResponse(BaseModel):
+    imported_count: int
+    source_platform: str
+    compliance_status: str
+    sources: list[InterviewKnowledgeSourceResponse]
+
+
+class InterviewKnowledgeSourceListResponse(BaseModel):
+    total_count: int
+    sources: list[InterviewKnowledgeSourceResponse]
+
+
+class InterviewKnowledgeCompileLinksRequest(BaseModel):
+    links: list[str] = Field(..., min_length=1)
+    default_company: str | None = None
+    default_role: str | None = None
+    default_city: str | None = None
+    compliance_status: str | None = None
+
+
+class InterviewKnowledgeCompileResult(BaseModel):
+    url: str
+    status: str
+    error: str | None = None
+    source_id: str | None = None
+    title: str | None = None
+    company: str | None = None
+    role: str | None = None
+    interview_stage: str | None = None
+    city: str | None = None
+    content_summary: str | None = None
+
+
+class InterviewKnowledgeCompileLinksResponse(BaseModel):
+    requested_count: int
+    compiled_count: int
+    imported_count: int
+    failed_count: int
+    results: list[InterviewKnowledgeCompileResult]
+
+
+class InterviewKnowledgeSearchResponseItem(BaseModel):
+    source_record_id: int
+    source_platform: str
+    source_type: str
+    source_id: str | None = None
+    url: str | None = None
+    title: str | None = None
+    company: str | None = None
+    role: str | None = None
+    interview_stage: str | None = None
+    city: str | None = None
+    content_summary: str
+    chunk_text: str
+    score: float
+    compliance_status: str
+
+
+class InterviewKnowledgeSearchResponse(BaseModel):
+    query: str
+    result_count: int
+    results: list[InterviewKnowledgeSearchResponseItem]
+
+
+class InterviewKnowledgeReindexResponse(BaseModel):
+    knowledge_base_job_id: int
+    source_count: int
+    document_count: int
+    chunk_count: int
+
+
+class AssistantRagSearchRequest(BaseModel):
+    message: str = Field(..., min_length=1)
+    company: str | None = None
+    role: str | None = None
+    interview_stage: str | None = None
+    city: str | None = None
+    top_k: int = 4
+
+
+class AssistantRagSearchResponse(BaseModel):
+    message: str
+    context: str
+    result_count: int
+    results: list[InterviewKnowledgeSearchResponseItem]

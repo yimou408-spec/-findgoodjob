@@ -4,6 +4,13 @@ import type {
   AssistantChatResponse,
   AssistantThreadResponse,
   AnalyzeJobResponse,
+  InterviewKnowledgeCompileLinksRequest,
+  InterviewKnowledgeCompileLinksResponse,
+  InterviewKnowledgeImportRequest,
+  InterviewKnowledgeImportResponse,
+  InterviewKnowledgeReindexResponse,
+  InterviewKnowledgeSearchResponse,
+  InterviewKnowledgeSourceListResponse,
   JobCreateInput,
   JobResponse,
   JobUpdateInput,
@@ -178,4 +185,53 @@ export function streamAssistantChat(
     body: input,
     onChunk,
   });
+}
+
+export function importManualKnowledge(input: InterviewKnowledgeImportRequest) {
+  return apiRequest<InterviewKnowledgeImportResponse>("/knowledge/import/manual", {
+    method: "POST",
+    body: input,
+  });
+}
+
+export function importResearchKnowledge(input: InterviewKnowledgeImportRequest) {
+  return apiRequest<InterviewKnowledgeImportResponse>("/knowledge/import/xiaohongshu-research", {
+    method: "POST",
+    body: input,
+  });
+}
+
+export function compileXiaohongshuLinks(input: InterviewKnowledgeCompileLinksRequest) {
+  return apiRequest<InterviewKnowledgeCompileLinksResponse>("/knowledge/compile-links/xiaohongshu", {
+    method: "POST",
+    body: input,
+  });
+}
+
+export function getInterviewKnowledgeSources(limit = 50) {
+  return apiRequest<InterviewKnowledgeSourceListResponse>(`/knowledge/sources?limit=${limit}`);
+}
+
+export function reindexInterviewKnowledge() {
+  return apiRequest<InterviewKnowledgeReindexResponse>("/knowledge/reindex", {
+    method: "POST",
+  });
+}
+
+export function searchInterviewKnowledge(params: {
+  query: string;
+  company?: string;
+  role?: string;
+  interview_stage?: string;
+  city?: string;
+  top_k?: number;
+}) {
+  const searchParams = new URLSearchParams();
+  searchParams.set("query", params.query);
+  if (params.company) searchParams.set("company", params.company);
+  if (params.role) searchParams.set("role", params.role);
+  if (params.interview_stage) searchParams.set("interview_stage", params.interview_stage);
+  if (params.city) searchParams.set("city", params.city);
+  if (params.top_k) searchParams.set("top_k", String(params.top_k));
+  return apiRequest<InterviewKnowledgeSearchResponse>(`/knowledge/search?${searchParams.toString()}`);
 }

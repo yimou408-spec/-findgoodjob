@@ -4,13 +4,15 @@ import pytest
 
 from app.exceptions import ModelInvocationError, NotFoundError
 from app.schemas import JobCreate, ResumeRevisionRequest
-from app.services import jd_service, resume_service
+from app.services import assistant_service, jd_service, resume_service
+from app.services.knowledge_service import build_retrieval_context, index_job_workspace, retrieve_job_knowledge
+from app.services.llm_output_service import normalize_model_output
 
 
 class FakeAgent:
     def invoke(self, payload):
         return {
-            "improvement_advice": ["突出项目结果", "补充关键技术关键词"],
+            "improvement_advice": ["**突出项目结果**", "*补充关键技术关键词*"],
             "analysis_result": f"模拟岗位分析摘要：{payload['input'][:12]}",
         }
 
@@ -42,8 +44,8 @@ class FakeLLM:
     def with_structured_output(self, schema, **_kwargs):
         parsed = schema(
             match_score=91,
-            match_explanation="当前简历已经覆盖大部分核心职责。",
-            revised_resume="模拟简历修订结果",
+            match_explanation="**当前简历已经覆盖大部分核心职责。**",
+            revised_resume="*模拟简历修订结果*",
         )
         return FakeStructuredRunnable(parsed=parsed)
 
@@ -61,6 +63,16 @@ def test_resume_request_validation():
 def test_get_job_or_404_raises(db_session):
     with pytest.raises(NotFoundError):
         jd_service.get_job_or_404(db_session, 999)
+
+
+def test_normalize_model_output_removes_markdown_noise():
+    content = "## 标题\n**LangChain** 项目经验\n* 熟悉 RAG\n+ 熟悉 FastAPI"
+    normalized = normalize_model_output(content)
+    assert "**" not in normalized
+    assert "##" not in normalized
+    assert "LangChain" in normalized
+    assert "RAG" in normalized
+    assert "FastAPI" in normalized
 
 
 def test_analyze_job_with_fallback(db_session, monkeypatch):
@@ -94,12 +106,18 @@ def test_analyze_job_with_mock_llm(db_session, monkeypatch):
     analyzed_job = jd_service.analyze_job(db_session, job)
     assert analyzed_job.analysis_result.startswith("模拟岗位分析摘要")
     assert analyzed_job.analysis_match_score is None
+    assert "**" not in analyzed_job.analysis_improvement_advice
     assert "突出项目结果" in analyzed_job.analysis_improvement_advice
 
 
 def test_revise_resume_with_fallback(monkeypatch):
     monkeypatch.setattr(resume_service, "llm_available", lambda: False)
-    job = SimpleNamespace(title="AI Agent 开发工程师", jd_text="熟悉 Python、FastAPI、DeepSeek", analysis_result=None)
+    job = SimpleNamespace(
+        title="AI Agent 开发工程师",
+        company="测试公司",
+        jd_text="熟悉 Python、FastAPI、DeepSeek",
+        analysis_result=None,
+    )
     result = resume_service.revise_resume_for_job(job, "3 年 Python 后端开发经验，熟悉 FastAPI。")
     assert "岗位匹配度判断" in result.revised_resume
     assert result.match_score is not None
@@ -119,6 +137,7 @@ def test_revise_resume_with_mock_llm(monkeypatch):
     assert result.revised_resume == "模拟简历修订结果"
     assert result.match_score == 91
     assert "核心职责" in result.match_explanation
+    assert "**" not in result.match_explanation
 
 
 def test_revise_resume_structured_output_failure(monkeypatch):
@@ -130,7 +149,7 @@ def test_revise_resume_structured_output_failure(monkeypatch):
             return FakeStructuredRunnable(
                 parsed=None,
                 parsing_error=ValueError("invalid json"),
-                raw=FakeRawMessage("这是一段普通文本输出", finish_reason="stop"),
+                raw=FakeRawMessage("这是普通文本输出", finish_reason="stop"),
             )
 
     monkeypatch.setattr(resume_service, "llm_available", lambda: True)
@@ -168,3 +187,66 @@ def test_revise_resume_model_error(monkeypatch):
     )
     with pytest.raises(ModelInvocationError):
         resume_service.revise_resume_for_job(job, "3 年 Python 后端开发经验，熟悉 FastAPI。")
+
+
+def test_job_knowledge_index_and_retrieve(db_session):
+    job = jd_service.create_job(
+        db_session,
+        JobCreate(
+            title="AI 产品经理",
+            company="测试公司",
+            jd_text="负责智能助手、RAG 检索和 Prompt 设计，熟悉知识库产品。",
+        ),
+    )
+    job.analysis_result = "需要理解 RAG、Agent 和 Prompt 设计。"
+    job.analysis_improvement_advice = "突出知识库和智能助手落地经验。"
+    db_session.add(job)
+    db_session.commit()
+    db_session.refresh(job)
+
+    stats = index_job_workspace(db_session, job)
+    chunks = retrieve_job_knowledge(db_session, job.id, "RAG 相关经验")
+    retrieval_context = build_retrieval_context(db_session, job.id, "RAG 相关经验")
+
+    assert stats.document_count >= 2
+    assert stats.chunk_count >= 2
+    assert chunks
+    assert "RAG" in retrieval_context
+
+
+def test_assistant_thread_state_includes_knowledge_stats(db_session, monkeypatch):
+    monkeypatch.setattr(assistant_service, "llm_available", lambda: False)
+    job = jd_service.create_job(
+        db_session,
+        JobCreate(
+            title="AI 产品经理",
+            company="测试公司",
+            jd_text="负责智能助手、RAG 检索和 Prompt 设计，熟悉知识库产品。",
+        ),
+    )
+
+    thread_state = assistant_service.get_assistant_thread_state(db_session, job)
+
+    assert thread_state.knowledge_document_count >= 1
+    assert thread_state.knowledge_chunk_count >= 1
+
+
+def test_assistant_interview_search_stays_within_current_job_scope(monkeypatch):
+    captured = {}
+
+    def fake_search(_db, query, *, company=None, role=None, top_k=4, **_kwargs):
+        captured["query"] = query
+        captured["company"] = company
+        captured["role"] = role
+        captured["top_k"] = top_k
+        return SimpleNamespace(result_count=0, results=[])
+
+    monkeypatch.setattr(assistant_service, "search_interview_knowledge", fake_search)
+    job = SimpleNamespace(title="AI 产品经理", company="测试公司")
+
+    response = assistant_service._find_interview_search_hits(None, job, "这个岗位一面会问什么")
+
+    assert response.result_count == 0
+    assert captured["company"] == "测试公司"
+    assert captured["role"] == "AI 产品经理"
+    assert captured["top_k"] == 3

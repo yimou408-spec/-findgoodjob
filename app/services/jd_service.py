@@ -15,6 +15,7 @@ from app.config import settings
 from app.exceptions import DatabaseError, ModelInvocationError, NotFoundError
 from app.models import JobDescription
 from app.schemas import JobCreate, JobUpdate
+from app.services.llm_output_service import normalize_model_output, normalize_streaming_content
 from app.tools.jd_tools import detect_focus_areas, extract_keywords, summarize_job
 
 logger = logging.getLogger("findgoodjob.jd_service")
@@ -95,16 +96,18 @@ def _build_job_analysis_fallback(job: JobDescription) -> dict[str, str]:
     focus = detect_focus_areas(job.jd_text)
     summary = summarize_job(job.jd_text, max_chars=220)
     focus_text = "、".join(focus)
-    analysis_result = (
-        "1. 岗位核心职责\n"
-        f"- 基于 JD 内容，岗位主要围绕以下主题展开：{summary}\n\n"
-        "2. 关键技能要求\n"
-        f"- 重点关键词：{', '.join(keywords)}\n"
-        f"- 能力方向：{focus_text}\n\n"
-        "3. 加分项\n"
-        "- 具备 Agent、RAG 和工程落地项目经验的候选人会更有竞争力。\n\n"
-        "4. 候选人应重点强调的经历\n"
-        "- 强调与目标岗位最相关的项目背景、技术选型、业务结果与量化产出。"
+    analysis_result = normalize_model_output(
+        (
+            "1. 岗位核心职责\n"
+            f"基于 JD 内容，岗位主要围绕以下主题展开：{summary}\n\n"
+            "2. 关键技能要求\n"
+            f"重点关键词：{', '.join(keywords)}\n"
+            f"能力方向：{focus_text}\n\n"
+            "3. 加分项\n"
+            "具备 Agent、RAG 和工程落地项目经验的候选人会更有竞争力。\n\n"
+            "4. 候选人应重点强调的经历\n"
+            "强调与目标岗位最相关的项目背景、技术选型、业务结果与量化产出。"
+        )
     )
     advice_lines = [
         "在简历中突出与岗位核心职责最相关的项目经历和量化成果。",
@@ -113,23 +116,23 @@ def _build_job_analysis_fallback(job: JobDescription) -> dict[str, str]:
     ]
     return {
         "analysis_result": analysis_result,
-        "improvement_advice": "\n".join(f"- {line}" for line in advice_lines),
+        "improvement_advice": "\n".join(advice_lines),
     }
 
 
 def _normalize_improvement_advice(value: object) -> str:
     if isinstance(value, list):
-        advice_items = [str(item).strip() for item in value if str(item).strip()]
+        advice_items = [normalize_model_output(str(item)) for item in value if str(item).strip()]
         if not advice_items:
             raise ValueError("improvement_advice list is empty")
-        return "\n".join(f"- {item}" for item in advice_items)
+        return "\n".join(advice_items)
     if isinstance(value, str) and value.strip():
-        return value.strip()
+        return normalize_model_output(value)
     raise ValueError("improvement_advice is invalid")
 
 
 def _normalize_analysis_payload(payload: dict) -> dict[str, str]:
-    analysis_result = str(payload.get("analysis_result", "")).strip()
+    analysis_result = normalize_model_output(str(payload.get("analysis_result", "")))
     if not analysis_result:
         raise ValueError("analysis_result is missing")
 
@@ -150,7 +153,7 @@ def _format_streaming_output(payload: dict[str, str]) -> str:
 
 
 def parse_analysis_stream_output(text: str) -> dict[str, str]:
-    normalized = text.replace("\r\n", "\n")
+    normalized = normalize_model_output(text).replace("\r\n", "\n")
     summary_index = normalized.find(ANALYSIS_SUMMARY_MARKER)
     advice_index = normalized.find(IMPROVEMENT_ADVICE_MARKER)
     if summary_index == -1 or advice_index == -1:
@@ -179,9 +182,9 @@ def _save_analysis_result(
     analysis_model: str,
     status: str,
 ) -> JobDescription:
-    job.analysis_result = payload["analysis_result"]
+    job.analysis_result = normalize_model_output(payload["analysis_result"])
     job.analysis_match_score = None
-    job.analysis_improvement_advice = payload["improvement_advice"]
+    job.analysis_improvement_advice = normalize_model_output(payload["improvement_advice"])
     job.analysis_model = analysis_model
     job.status = status
     job.analyzed_at = datetime.now(timezone.utc)
@@ -246,18 +249,22 @@ async def stream_analyze_job(db: Session, job: JobDescription) -> AsyncIterator[
 
     logger.info("job_analysis mode=deepseek_stream job_id=%s model=%s", job_id, settings.deepseek_model)
     content = ""
+    previous_normalized = ""
     received_chunk = False
     try:
         messages = build_job_analysis_stream_messages(job.jd_text)
         async for chunk in stream_chat_completion(messages, max_tokens=900):
             received_chunk = True
             content += chunk
-            yield {"type": "chunk", "delta": chunk, "content": content}
+            normalized_content = normalize_streaming_content(content)
+            delta = normalized_content[len(previous_normalized) :] if normalized_content.startswith(previous_normalized) else ""
+            previous_normalized = normalized_content
+            yield {"type": "chunk", "delta": delta, "content": normalized_content}
         payload = parse_analysis_stream_output(content)
         analyzed_job = _save_analysis_result(db, job, payload, settings.deepseek_model, "analyzed")
         yield {
             "type": "complete",
-            "content": content,
+            "content": _format_streaming_output(payload),
             "data": {
                 "job_id": analyzed_job.id,
                 "analysis_result": analyzed_job.analysis_result or "",

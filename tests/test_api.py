@@ -1,5 +1,6 @@
 from io import BytesIO
 
+from app.schemas import InterviewKnowledgeSearchResponse, InterviewKnowledgeSearchResponseItem
 from app.services import assistant_service, jd_service, resume_service
 from app.services.document_service import MAX_UPLOAD_SIZE_BYTES
 
@@ -167,6 +168,7 @@ def test_get_assistant_thread_initial_state(client, monkeypatch):
     assert data["can_chat"] is False
     assert "岗位 JD" in data["workspace_summary"]
     assert data["latest_resume_revision"] is None
+    assert data["knowledge_document_count"] >= 1
 
 
 def test_get_assistant_thread_includes_latest_resume_revision(client, monkeypatch):
@@ -189,15 +191,41 @@ def test_get_assistant_thread_includes_latest_resume_revision(client, monkeypatc
     assert "最近一次简历修订输出" in data["workspace_summary"]
 
 
-def test_assistant_chat_stream_persists_messages(client, monkeypatch):
+def test_assistant_chat_stream_persists_messages_and_cleans_markdown(client, monkeypatch):
     async def fake_stream_chat_completion(_messages, max_tokens):
-        assert max_tokens == 1200
-        yield "第一段回复"
-        yield "，第二段回复"
+        assert max_tokens == 2200
+        yield "**第一段回复**"
+        yield "，*第二段回复*"
 
     monkeypatch.setattr(assistant_service, "llm_available", lambda: True)
     monkeypatch.setattr(assistant_service, "stream_chat_completion", fake_stream_chat_completion)
     monkeypatch.setattr(assistant_service, "_summarize_thread_memory", lambda _workspace, _messages: "新的线程摘要")
+    monkeypatch.setattr(
+        assistant_service,
+        "search_interview_knowledge",
+        lambda *_args, **_kwargs: InterviewKnowledgeSearchResponse(
+            query="请帮我分析这个岗位最看重什么",
+            result_count=1,
+            results=[
+                InterviewKnowledgeSearchResponseItem(
+                    source_record_id=1,
+                    source_platform="xiaohongshu",
+                    source_type="manual_summary",
+                    source_id="note-001",
+                    url="https://www.xiaohongshu.com/explore/note-001",
+                    title="美团产品经理一面面经",
+                    company="美团",
+                    role="产品经理",
+                    interview_stage="一面",
+                    city="北京",
+                    content_summary="美团产品经理一面重点考察用户增长、业务理解和反问。",
+                    chunk_text="美团产品经理一面主要问用户增长、需求拆解和反问。",
+                    score=0.9,
+                    compliance_status="manual",
+                )
+            ],
+        ),
+    )
 
     created = client.post("/jobs", json=create_job_payload()).json()
     response = client.post(
@@ -208,13 +236,16 @@ def test_assistant_chat_stream_persists_messages(client, monkeypatch):
     assert response.status_code == 200
     assert '"type": "complete"' in response.text
     assert "第一段回复" in response.text
+    assert "**" not in response.text
 
     thread_response = client.get(f"/jobs/{created['id']}/assistant/thread")
     thread_data = thread_response.json()
     assert len(thread_data["messages"]) == 2
     assert thread_data["messages"][0]["role"] == "user"
     assert thread_data["messages"][1]["role"] == "assistant"
-    assert thread_data["messages"][1]["content"] == "第一段回复，第二段回复"
+    assert "第一段回复，第二段回复" in thread_data["messages"][1]["content"]
+    assert thread_data["messages"][1]["retrieval_note"]
+    assert "https://www.xiaohongshu.com/explore/note-001" in thread_data["messages"][1]["source_links"]
     assert thread_data["summary_text"] == "新的线程摘要"
 
 
@@ -230,6 +261,26 @@ def test_assistant_chat_stream_returns_error_when_llm_unavailable(client, monkey
     assert response.status_code == 200
     assert '"type": "error"' in response.text
     assert "DEEPSEEK_API_KEY" in response.text
+
+
+def test_job_knowledge_endpoints(client, monkeypatch):
+    monkeypatch.setattr(jd_service, "llm_available", lambda: False)
+    monkeypatch.setattr(resume_service, "llm_available", lambda: False)
+    created = client.post("/jobs", json=create_job_payload()).json()
+    client.post(f"/jobs/{created['id']}/analyze")
+    client.post(
+        f"/jobs/{created['id']}/revise-resume",
+        json={"resume_text": "3 年 Python 后端经验，熟悉 FastAPI、MySQL、Redis，也做过知识库和 RAG 项目。"},
+    )
+
+    get_response = client.get(f"/jobs/{created['id']}/knowledge")
+    reindex_response = client.post(f"/jobs/{created['id']}/knowledge/reindex")
+
+    assert get_response.status_code == 200
+    assert get_response.json()["document_count"] >= 2
+    assert get_response.json()["chunk_count"] >= 2
+    assert reindex_response.status_code == 200
+    assert reindex_response.json()["document_count"] >= 2
 
 
 def test_validation_error_for_short_jd(client):

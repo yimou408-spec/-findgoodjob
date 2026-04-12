@@ -1,0 +1,5 @@
+### Reindex interview knowledge embeddings
+POST http://127.0.0.1:8000/knowledge/reindex
+
+### Reindex current job workspace embeddings
+POST http://127.0.0.1:8000/jobs/14/knowledge/reindex
