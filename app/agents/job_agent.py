@@ -26,7 +26,7 @@ def build_llm() -> ChatDeepSeek:
         model=settings.deepseek_model,
         base_url=settings.deepseek_base_url,
         api_key=settings.deepseek_api_key,
-        temperature=0.2,
+        temperature=0.5,
         max_retries=1,
         http_client=http_client,
         http_async_client=http_async_client,
@@ -87,7 +87,7 @@ async def stream_chat_completion(messages: list[dict[str, str]], max_tokens: int
     payload = {
         "model": settings.deepseek_model,
         "messages": messages,
-        "temperature": 0.2,
+        "temperature": 0.5,
         "max_tokens": max_tokens,
         "stream": True,
     }
