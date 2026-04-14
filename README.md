@@ -1,4 +1,17 @@
 # FindGoodJob Agent
+## Preview
+
+<p align="center">
+  <img src="./docs/jobs-page.png" alt="Jobs page" width="900" />
+</p>
+
+<p align="center">
+  <img src="./docs/assistant-page.png" alt="Assistant page" width="900" />
+</p>
+
+<p align="center">
+  <img src="./docs/knowledge-base-page.png" alt="Knowledge base page" width="900" />
+</p>
 
 这是一个面向求职场景的 AI Agent 项目，当前包含：
 
